@@ -139,7 +139,7 @@ variable_norm_info = {
 }
 
 # -------------------------------------------------
-# (D) Dataset -> (time, channel, lat, lon) 변환 함수
+# (D) Dataset -> (time, channel, lat, lon) 변환 함수ddddddd
 # -------------------------------------------------
 def dataset_to_array(ds: xr.Dataset, var_list: list):
     arrays = []
