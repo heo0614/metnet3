@@ -4,34 +4,55 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.nn import DataParallel
 
 # ============================================================
-# (1) Dataset 정의 (사용자 코드 예시 그대로)
+# Dataset 정의 (원본과 동일)
 # ============================================================
 class WeatherBenchDataset(Dataset):
+    """
+    전처리된 .npy (6시간 입력 + 6시간 타겟) 파일을 로드하여
+    MetNet3에 들어갈 형태로 제공하는 예시 Dataset
+    """
     def __init__(self, root_dir):
+        """
+        root_dir 예:
+          E:\metnet3\weather_bench\trainset
+        """
         self.root_dir = root_dir
 
         # ==========================
-        # (1) 입력 (Input)
+        # (1) 입력 (Input) 불러오기
         # ==========================
         self.input_sparse = np.load(os.path.join(root_dir, 'input_sparse_normalized.npy'))  # (N,30,156,156)
         self.input_stale  = np.load(os.path.join(root_dir, 'input_stale_normalized.npy'))   # (N, 6,156,156)
         self.input_dense  = np.load(os.path.join(root_dir, 'input_dense_normalized.npy'))   # (N,36,156,156)
         self.input_low    = np.load(os.path.join(root_dir, 'input_low_normalized.npy'))     # (N,12,156,156)
+
         self.num_samples = self.input_sparse.shape[0]
 
         # ==========================
-        # (2) 타겟 (Target)
+        # (2) 타겟 (Target) 불러오기
         # ==========================
-        self.t2m = np.load(os.path.join(root_dir, 'sparse_target', '2m_temperature.npy'))             # (N,6,32,32)
-        self.d2m = np.load(os.path.join(root_dir, 'sparse_target', '2m_dewpoint_temperature.npy'))    # (N,6,32,32)
-        self.precip32 = np.load(os.path.join(root_dir, 'sparse_target', 'total_precipitation.npy'))   # (N,6,32,32)
+        # (a) sparse_target (각 변수별 (N,6,32,32))
+        self.t2m = np.load(os.path.join(root_dir, 'sparse_target', '2m_temperature.npy'))
+        self.d2m = np.load(os.path.join(root_dir, 'sparse_target', '2m_dewpoint_temperature.npy'))
+        self.precip32 = np.load(os.path.join(root_dir, 'sparse_target', 'total_precipitation.npy'))
 
+        # (b) dense_target = (N,36,32,32)
         self.dense_target_36ch = np.load(os.path.join(root_dir, 'dense_target.npy'))  # (N,36,32,32)
-        self.high_precip = np.load(os.path.join(root_dir, 'high_target', 'total_precipitation.npy'))  # (N,6,128,128)
-        self.hrrr_36ch   = self.dense_target_36ch  # 예시상 동일하게 사용
 
+        # (c) high_target 예: total_precipitation (N,6,128,128)
+        self.high_precip = np.load(os.path.join(root_dir, 'high_target', 'total_precipitation.npy'))
+
+        # (d) HRRR-like 타겟 (N,36,32,32)
+        self.hrrr_36ch = self.dense_target_36ch
+
+        # ==========================
+        # (3) Bin Names 정의
+        # ==========================
         self.surface_bin_names = ('temperature_2m', 'dewpoint_2m')
         self.precipitation_bin_names = ('total_precipitation',)
 
@@ -39,43 +60,46 @@ class WeatherBenchDataset(Dataset):
         return self.num_samples
 
     def __getitem__(self, idx):
-        # ---- 입력 텐서 변환 ----
+        # 입력 텐서 변환 (float)
         in_sparse = torch.from_numpy(self.input_sparse[idx]).float()  # (30,156,156)
         in_stale  = torch.from_numpy(self.input_stale[idx]).float()   # ( 6,156,156)
         in_dense  = torch.from_numpy(self.input_dense[idx]).float()   # (36,156,156)
         in_low    = torch.from_numpy(self.input_low[idx]).float()     # (12,156,156)
 
-        # ---- 타겟 텐서 변환 ---- (여기서는 이미 bin index라고 가정하여 long으로 변환)
-        t2m_6h    = torch.from_numpy(self.t2m[idx]).long()      # (6,32,32)
-        d2m_6h    = torch.from_numpy(self.d2m[idx]).long()      # (6,32,32)
-        precip_6h = torch.from_numpy(self.precip32[idx]).long() # (6,32,32)
-
+        # 타겟 변환
+        t2m_6h     = torch.from_numpy(self.t2m[idx]).long()        # (6,32,32)
+        d2m_6h     = torch.from_numpy(self.d2m[idx]).long()        # (6,32,32)
+        precip_6h  = torch.from_numpy(self.precip32[idx]).long()     # (6,32,32)
         dense_target_36ch = torch.from_numpy(self.dense_target_36ch[idx]).long()  # (36,32,32)
-        high_precip_6h    = torch.from_numpy(self.high_precip[idx]).long()        # (6,128,128)
-        hrrr_36ch         = torch.from_numpy(self.hrrr_36ch[idx]).float()         # (36,32,32)
+        high_precip_6h = torch.from_numpy(self.high_precip[idx]).long()           # (6,128,128)
+        hrrr_36ch = torch.from_numpy(self.hrrr_36ch[idx]).float()                 # (36,32,32)
 
-        # ---- 임의 리드타임 예시 ----
+        # lead_time 예시 (0~721 중 하나)
         lead_time = torch.tensor(np.random.randint(0, 722), dtype=torch.long)
 
         sample = {
             "lead_time": lead_time,
-            "input_sparse": in_sparse,  # (30,156,156)
-            "input_stale":  in_stale,   # ( 6,156,156)
-            "input_dense":  in_dense,   # (36,156,156)
-            "input_low":    in_low,     # (12,156,156),
+            # ---- 입력 ----
+            "input_sparse": in_sparse,
+            "input_stale":  in_stale,
+            "input_dense":  in_dense,
+            "input_low":    in_low,
+            # ---- 타겟 (예시) ----
             "precipitation_targets": {
-                "total_precipitation": high_precip_6h[-1]   # (128,128)
+                # 여기서는 high_target의 마지막 프레임만 사용 (예: (128,128))
+                "total_precipitation": high_precip_6h[-1]
             },
             "surface_targets": {
-                "temperature_2m": t2m_6h[-1],  # (32,32)
-                "dewpoint_2m":    d2m_6h[-1],  # (32,32)
+                "temperature_2m": t2m_6h[-1],
+                "dewpoint_2m":    d2m_6h[-1],
             },
-            "hrrr_target": hrrr_36ch,   # (36,32,32)
+            # HRRR-like 타겟
+            "hrrr_target": hrrr_36ch
         }
         return sample
 
 # ============================================================
-# (2) DataLoader
+# Data Loading
 # ============================================================
 train_root = r"/projects/aiid/KIPOT_SKT/Weather/trainset"
 val_root   = r"/projects/aiid/KIPOT_SKT/Weather/validationset"
@@ -85,18 +109,18 @@ train_dataset = WeatherBenchDataset(train_root)
 val_dataset   = WeatherBenchDataset(val_root)
 test_dataset  = WeatherBenchDataset(test_root)
 
-train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True,  num_workers=4)
+train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True, num_workers=4)
 val_loader   = DataLoader(val_dataset,   batch_size=4, shuffle=False, num_workers=4)
 test_loader  = DataLoader(test_dataset,  batch_size=4, shuffle=False, num_workers=4)
 
 # ============================================================
-# (3) MetNet3 모델 준비
+# Model Initialization
 # ============================================================
 from metnet3_original import MetNet3
 
 metnet3 = MetNet3(
     dim = 512,
-    num_lead_times = 180,
+    num_lead_times = 722,
     lead_time_embed_dim = 32,
     input_spatial_size = 156,
     attn_depth = 12,
@@ -107,12 +131,12 @@ metnet3 = MetNet3(
     vit_mbconv_expansion_rate = 4,
     vit_mbconv_shrinkage_rate = 0.25,
     # 채널 설정
-    hrrr_channels = 36,       # (dense=36채널)
-    input_2496_channels = 30, # (sparse=30채널)
-    input_4996_channels = 12, # (low=12채널)
+    hrrr_channels = 36,      # (dense=36채널)
+    input_2496_channels = 30,# (sparse=30채널)
+    input_4996_channels = 12,# (low=12채널)
     surface_and_hrrr_target_spatial_size = 32,
     precipitation_target_bins = dict(
-        total_precipitation = 512,  # 512개 bin
+        total_precipitation = 512,
     ),
     surface_target_bins = dict(
         temperature_2m = 256,
@@ -126,106 +150,74 @@ metnet3 = MetNet3(
 )
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-metnet3.to(device)
+print(f"Using device: {device}")
+metnet3 = metnet3.to(device) 
+metnet3 = DataParallel(metnet3)  # Enable DistributedDataParallel for multi-GPU usage
 
 optimizer = torch.optim.Adam(metnet3.parameters(), lr=1e-4)
 
 # ============================================================
-# (4) Manual Scaling Functions
+# Training Loop with Early Stopping (5 Epochs No Improvement)
 # ============================================================
-def apply_manual_scaling(hrrr_target, surface_targets, high_precip_6h):
-    """
-    Apply manual scaling factors to the HRRR target and surface targets.
-    - HRRR target: Multiply by 10 and then divide by 36.
-    - Surface targets (temperature_2m, dewpoint_2m): Multiply by 30 to give more weight.
-    """
-    # Scale HRRR target (dense target) by 10 and divide by 36
-    hrrr_target_scaled = hrrr_target * 10 / 36
-    
-    # Apply additional scaling to surface targets
-    surface_targets['temperature_2m'] *= 30
-    surface_targets['dewpoint_2m'] *= 30
-    
-    # Return the scaled targets
-    return hrrr_target_scaled, surface_targets, high_precip_6h
-
-# ============================================================
-# (5) Training Loop + Early Stopping(최근 10 epoch 기준)
-# ============================================================
-save_dir = "/projects/aiid/KIPOT_SKT/Weather/test_outputs"
-os.makedirs(save_dir, exist_ok=True)
-
-results_file = os.path.join(save_dir, "train_results.txt")
-
-best_crps = float('inf')
-best_csi  = 0.0
+best_precip_acc = 0.0
 best_model_state = None
-
+epoch = 120
 no_improve_count = 0
-early_stopping_patience = 15  # 10 epoch 연속으로 개선 없으면 stop
+max_no_improve = 30
 
-max_epochs = 120  # 최대 Epoch은 예시
-
-with open(results_file, "w") as f:
-    f.write("epoch\ttrain_loss\tval_crps\tval_csi\n")
-
-for epoch in range(1, 120):
+while epoch:
     metnet3.train()
     epoch_loss = 0.0
-
-    # -------------------------
-    # (A) Training Phase
-    # -------------------------
     for batch in train_loader:
-        # 1) 입력
-        lead_times = batch['lead_time'].to(device)
-        in_sparse  = batch['input_sparse'].to(device)
-        in_stale   = batch['input_stale'].to(device)
-        in_dense   = batch['input_dense'].to(device)
-        in_low     = batch['input_low'].to(device)
+        # (A) 입력 데이터 준비
+        lead_times = batch['lead_time'].to(device)   # (B,)
+        in_sparse  = batch['input_sparse'].to(device) # (B,30,156,156)
+        in_stale   = batch['input_stale'].to(device)  # (B,6,156,156)
+        in_dense   = batch['input_dense'].to(device)  # (B,36,156,156)
+        in_low     = batch['input_low'].to(device)    # (B,12,156,156)
 
-        # 2) 타겟
-        precip_targets = {k: v.to(device) for k, v in batch['precipitation_targets'].items()}
-        surface_targets = {k: v.to(device) for k, v in batch['surface_targets'].items()}
-        hrrr_target = batch['hrrr_target'].to(device)
+        # (B) 타겟 (precipitation, surface, HRRR)
+        precip_targets = { key: value.to(device) for key, value in batch['precipitation_targets'].items() }
+        surface_targets = { key: value.to(device) for key, value in batch['surface_targets'].items() }
+        hrrr_target = batch['hrrr_target'].to(device)   # (B,36,32,32)
 
-        # Apply manual scaling
-        hrrr_target_scaled, surface_targets_scaled, high_precip_6h_scaled = apply_manual_scaling(hrrr_target, surface_targets, batch['precipitation_targets']['total_precipitation'])
-
-        # 3) forward & loss
+        # (C) 모델 forward 및 loss 계산
         optimizer.zero_grad()
 
-        # Forward pass
+        # Custom scaling factor for HRRR loss (10x and per-channel scaling)
         total_loss, loss_breakdown = metnet3(
             lead_times            = lead_times,
-            hrrr_input_2496       = in_dense,
+            hrrr_input_2496       = (in_dense * 10)/36,  # Apply 10x scaling to HRRR inputs
             hrrr_stale_state      = in_stale,
             input_2496            = in_sparse,
             input_4996            = in_low,
-            precipitation_targets = precip_targets,
-            surface_targets       = surface_targets_scaled,
-            hrrr_target           = hrrr_target_scaled,
+            precipitation_targets = {key: value * 10 for key, value in precip_targets.items()},  # Apply * 10 to each target value
+            surface_targets       = {key: value * 10 for key, value in surface_targets.items()},  # Apply * 10 to each surface target value
+            hrrr_target           = hrrr_target,
         )
-        
+
         total_loss = total_loss.sum()
+        
+        # Apply dynamic gradient rescaling for dense targets (using L1 norm for channel rescaling)
+        for param in metnet3.parameters():
+            if param.grad is not None:
+                param.grad.data = param.grad.data / (param.grad.data.abs().sum() + 1e-8) * param.grad.data.numel()  # L1 norm scaling
+                
         total_loss.backward()
         optimizer.step()
-
         epoch_loss += total_loss.item()
 
     avg_epoch_loss = epoch_loss / len(train_loader)
+    print(f"[Epoch {epoch}] Average Training Loss = {avg_epoch_loss:.4f}, Loss Breakdown = {loss_breakdown}")
 
-    # -------------------------
-    # (B) Validation Phase
-    # -------------------------
+    # ============================================================
+    # Validation: CRPS and CSI Calculation
+    # ============================================================
     metnet3.eval()
-    total_crps_val = 0.0
-    total_csi_val  = 0.0
-    count_batches  = 0
-
-    threshold_bin = 5
-    prob_cut      = 0.5
-
+    total_correct = 0
+    total_pixels = 0
+    total_crps = 0.0
+    total_csi = 0.0
     with torch.no_grad():
         for batch in val_loader:
             lead_times = batch['lead_time'].to(device)
@@ -233,7 +225,9 @@ for epoch in range(1, 120):
             in_stale   = batch['input_stale'].to(device)
             in_dense   = batch['input_dense'].to(device)
             in_low     = batch['input_low'].to(device)
+            precip_targets = { key: value.to(device) for key, value in batch['precipitation_targets'].items() }
 
+            # 모델 forward (타겟 없이 예측)
             pred = metnet3(
                 lead_times       = lead_times,
                 hrrr_input_2496  = in_dense,
@@ -241,72 +235,45 @@ for epoch in range(1, 120):
                 input_2496       = in_sparse,
                 input_4996       = in_low,
             )
+            # precipitation 예측만 사용 (dict: key는 'total_precipitation')
             precipitation_preds = pred.precipitation
-
-            # 배치별 CRPS/CSI
             for key, logits in precipitation_preds.items():
-                probs = F.softmax(logits, dim=1)  # (B, C, H, W)
-                target_bin = batch['precipitation_targets'][key].to(device)
+                probs = F.softmax(logits, dim=1)       # (B, C, H, W)
+                preds = torch.argmax(probs, dim=1)       # (B, H, W)
+                pred_labels = preds.reshape(-1)
+                target_labels = precip_targets[key].cpu().numpy().reshape(-1)
+                correct = (pred_labels.cpu().numpy() == target_labels).sum()
+                total_correct += correct
+                total_pixels += target_labels.size
 
-                batch_crps = compute_crps(probs, target_bin)
-                total_crps_val += batch_crps.item()
+                # CRPS and CSI calculation (example)
+                crps = np.mean(np.abs(pred_labels.cpu().numpy() - target_labels))
+                csi = (correct) / (total_pixels)  # This is a simplified CSI
 
-                batch_csi = compute_csi(probs, target_bin, threshold_bin, prob_cut)
-                total_csi_val += batch_csi
+                total_crps += crps
+                total_csi += csi
 
-            count_batches += 1
+    precip_acc = total_correct / total_pixels if total_pixels > 0 else 0
+    print(f"[Epoch {epoch}] Validation CRPS: {total_crps:.4f}, CSI: {total_csi:.4f}, Precipitation Accuracy: {precip_acc:.4f}")
 
-    val_crps = total_crps_val / count_batches if count_batches > 0 else 0.0
-    val_csi  = total_csi_val  / count_batches if count_batches > 0 else 0.0
-
-    # -------------------------
-    # (C) 로그 출력 및 파일 기록
-    # -------------------------
-    print(f"[Epoch {epoch}] Training Loss = {avg_epoch_loss:.4f}, Breakdown = {loss_breakdown}")
-    print(f"[Epoch {epoch}] Validation CRPS = {val_crps:.4f} | CSI(thr=1mm/h) = {val_csi:.4f}")
-
-    # 파일에 기록 (append)
-    with open(results_file, "a") as f:
-        f.write(f"{epoch}\t{avg_epoch_loss:.4f}\t{val_crps:.4f}\t{val_csi:.4f}\n")
-
-    # -------------------------
-    # (D) Early Stopping 로직 (CRPS↓, CSI↑ 중 하나라도 개선되면 best 갱신)
-    # -------------------------
-    improved = False
-
-    if val_crps < best_crps:
-        best_crps = val_crps
-        improved = True
-    if val_csi > best_csi:
-        best_csi = val_csi
-        improved = True
-
-    if improved:
+    # 개선이 있을 경우 best model 저장, 없으면 no_improve_count 증가
+    if precip_acc > best_precip_acc:
+        best_precip_acc = precip_acc
         best_model_state = copy.deepcopy(metnet3.state_dict())
         no_improve_count = 0
-        print(f"  --> Improvement found (CRPS={val_crps:.4f}, CSI={val_csi:.4f}). Best model saved.")
+        print(f"Improved precipitation accuracy to {best_precip_acc:.4f}. Continuing training.")
     else:
         no_improve_count += 1
-        print(f"  --> No improvement for {no_improve_count} epoch(s).")
-
-    if no_improve_count >= early_stopping_patience:
-        print(f"Early stopping triggered after {no_improve_count} epochs without improvement.")
-        break
+        print(f"No improvement in precipitation accuracy for {no_improve_count} consecutive epoch(s).")
 
 # ============================================================
-# (6) 최종 모델 저장
+# 최종 모델 저장 (향상된 best model을 저장)
 # ============================================================
 if best_model_state is not None:
     metnet3.load_state_dict(best_model_state)
 
+save_dir = "/projects/aiid/KIPOT_SKT/Weather/test_outputs"
+os.makedirs(save_dir, exist_ok=True)
 save_path = os.path.join(save_dir, "metnet3_final.pth")
-torch.save(best_model_state, save_path)
-print(f"Final model (best CRPS/CSI) saved to {save_path}")
-
-# 최종 성능 저장
-with open(results_file, "a") as f:
-    f.write("\n=== Final Best Performance ===\n")
-    f.write(f"Best CRPS = {best_crps:.4f}\n")
-    f.write(f"Best CSI  = {best_csi:.4f}\n")
-
-print(f"Best CRPS = {best_crps:.4f}, Best CSI = {best_csi:.4f}")
+torch.save(metnet3.state_dict(), save_path)
+print(f"Final model saved to {save_path}")

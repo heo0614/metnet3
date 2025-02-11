@@ -153,15 +153,17 @@ metnet3.to(device)
 optimizer = torch.optim.Adam(metnet3.parameters(), lr=1e-4)
 
 # ============================================================
-# Training Loop with Early Stopping (5 Epochs No Improvement)
+# Training Loop with Early Stopping (최소 30 에폭 진행 후 5 에폭 연속 개선 없으면 종료)
 # ============================================================
 best_precip_acc = 0.0
 best_model_state = None
-epoch = 30
-no_improve_count = 0
-max_no_improve = 5
+min_epochs = 30       # 최소 에폭 수
+max_no_improve = 5    # 개선 없는 에폭이 5회 연속이면 종료
+epoch = 0
+no_improve_count = 0  # 연속 개선이 없는 에폭 수
 
-while epoch:
+while True:
+    epoch += 1
     metnet3.train()
     epoch_loss = 0.0
     for batch in train_loader:
@@ -197,7 +199,7 @@ while epoch:
     print(f"[Epoch {epoch}] Average Training Loss = {avg_epoch_loss:.4f}, Loss Breakdown = {loss_breakdown}")
 
     # ============================================================
-    # Validation: Precipitation Accuracy 만 계산asdfaf
+    # Validation: Precipitation Accuracy만 계산
     # ============================================================
     metnet3.eval()
     total_correct = 0
@@ -237,11 +239,16 @@ while epoch:
     if precip_acc > best_precip_acc:
         best_precip_acc = precip_acc
         best_model_state = copy.deepcopy(metnet3.state_dict())
-        no_improve_count = 0
+        no_improve_count = 0  # 개선 시 카운터 리셋
         print(f"Improved precipitation accuracy to {best_precip_acc:.4f}. Continuing training.")
     else:
         no_improve_count += 1
         print(f"No improvement in precipitation accuracy for {no_improve_count} consecutive epoch(s).")
+
+    # 최소 min_epochs 이후 5 에폭 연속 개선 없으면 조기 종료
+    if epoch >= min_epochs and no_improve_count >= max_no_improve:
+        print(f"Early stopping triggered after {epoch} epochs with {no_improve_count} consecutive epochs without improvement.")
+        break
 
 # ============================================================
 # 최종 모델 저장 (향상된 best model을 저장)
