@@ -64,9 +64,9 @@ class WeatherBenchDataset(Dataset):
         in_low    = torch.from_numpy(self.input_low[idx]).float()     # (12,156,156)
 
         # 타겟 변환
-        t2m_6h     = torch.from_numpy(self.t2m[idx]).long()        # (6,32,32)
-        d2m_6h     = torch.from_numpy(self.d2m[idx]).long()        # (6,32,32)
-        precip_6h  = torch.from_numpy(self.precip32[idx]).long()     # (6,32,32)
+        t2m_6h     = torch.from_numpy(self.t2m[idx]).long()           # (6,32,32)
+        d2m_6h     = torch.from_numpy(self.d2m[idx]).long()           # (6,32,32)
+        precip_6h  = torch.from_numpy(self.precip32[idx]).long()      # (6,32,32)
         dense_target_36ch = torch.from_numpy(self.dense_target_36ch[idx]).long()  # (36,32,32)
         high_precip_6h = torch.from_numpy(self.high_precip[idx]).long()           # (6,128,128)
         hrrr_36ch = torch.from_numpy(self.hrrr_36ch[idx]).float()                 # (36,32,32)
@@ -117,7 +117,7 @@ from metnet3_original import MetNet3
 
 metnet3 = MetNet3(
     dim = 512,
-    num_lead_times = 722,
+    num_lead_times = 180,
     lead_time_embed_dim = 32,
     input_spatial_size = 156,
     attn_depth = 12,
@@ -146,17 +146,22 @@ metnet3 = MetNet3(
     resnet_block_depth = 2,
 )
 
+# ============================================================
+# GPU 설정 (4대 모두 사용)
+# ============================================================
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
+# 모델을 먼저 1개 GPU로 이동
 metnet3.to(device)
+# nn.DataParallel로 감싸서 4개 GPU 병렬 처리
+metnet3 = torch.nn.DataParallel(metnet3, device_ids=[0,1,2,3])
 
 optimizer = torch.optim.Adam(metnet3.parameters(), lr=1e-4)
 
+print(f"Using device: {device}, GPUs: {torch.cuda.device_count()}")
+print("Model is wrapped in DataParallel for multi-GPU training.")
+
 # ============================================================
 # Training Loop with Early Stopping (최소 30 에폭 진행 후 5 에폭 연속 개선 없으면 종료)
-# ============================================================
-# ============================================================
-# Training Loop with Early Stopping (정확도가 향상되면 5번 연속 개선 없을 때까지 학습)
 # ============================================================
 best_precip_acc = 0.0
 best_model_state = None
@@ -184,6 +189,8 @@ while True:
 
         # (C) 모델 forward 및 loss 계산
         optimizer.zero_grad()
+        # DataParallel을 썼기 때문에 forward 호출 시에는 기존과 동일하게
+        # lead_times=..., hrrr_input_2496=... 등의 키워드 인자를 그대로 전달해도 됩니다.
         total_loss, loss_breakdown = metnet3(
             lead_times            = lead_times,
             hrrr_input_2496       = in_dense,
@@ -227,8 +234,8 @@ while True:
             # precipitation 예측만 사용 (dict: key는 'total_precipitation')
             precipitation_preds = pred.precipitation
             for key, logits in precipitation_preds.items():
-                probs = F.softmax(logits, dim=1)       # (B, C, H, W)
-                preds = torch.argmax(probs, dim=1)       # (B, H, W)
+                probs = F.softmax(logits, dim=1)        # (B, C, H, W)
+                preds = torch.argmax(probs, dim=1)      # (B, H, W)
                 pred_labels = preds.reshape(-1)
                 target_labels = precip_targets[key].cpu().numpy().reshape(-1)
                 correct = (pred_labels.cpu().numpy() == target_labels).sum()
@@ -241,7 +248,8 @@ while True:
     # 개선이 있을 경우 best model 저장, 없으면 no_improve_count 증가
     if precip_acc > best_precip_acc:
         best_precip_acc = precip_acc
-        best_model_state = copy.deepcopy(metnet3.state_dict())
+        # DataParallel 환경에서는 실제 모델 가중치에 접근하려면 metnet3.module.state_dict()
+        best_model_state = copy.deepcopy(metnet3.module.state_dict())
         no_improve_count = 0  # 개선 시 카운터 리셋
         print(f"Improved precipitation accuracy to {best_precip_acc:.4f}. Continuing training.")
     else:
@@ -251,7 +259,7 @@ while True:
     # 개선이 없으면 no_improve_count 리셋
     if no_improve_count == max_no_improve:
         print(f"No improvement for {max_no_improve} consecutive epochs. Restarting the training.")
-        no_improve_count = 0  # 정확도가 향상되면 카운트를 리셋하고 다시 5번 동안 정확도 향상이 없을 때까지 학습을 진행합니다.
+        no_improve_count = 0
 
     # 최소 min_epochs 이후 5 에폭 연속 개선 없으면 조기 종료
     if epoch >= min_epochs and no_improve_count >= max_no_improve:
@@ -262,11 +270,12 @@ while True:
 # 최종 모델 저장 (향상된 best model을 저장)
 # ============================================================
 if best_model_state is not None:
-    metnet3.load_state_dict(best_model_state)
+    # DataParallel을 사용하는 경우, 실제 모델 객체(metnet3.module)에 로드
+    metnet3.module.load_state_dict(best_model_state)
 
 save_dir = "/projects/aiid/KIPOT_SKT/Weather/test_outputs"
 os.makedirs(save_dir, exist_ok=True)
 save_path = os.path.join(save_dir, "metnet3_final.pth")
-torch.save(metnet3.state_dict(), save_path)
+# 저장 시에도 metnet3.module.state_dict()를 사용해서 저장하는 것이 안전합니다.
+torch.save(metnet3.module.state_dict(), save_path)
 print(f"Final model saved to {save_path}")
-
