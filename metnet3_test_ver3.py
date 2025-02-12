@@ -33,6 +33,41 @@ def compute_crps(pred_probs: torch.Tensor, target_labels: torch.Tensor) -> float
     # (4) CRPS = diff_sq의 전체 평균
     crps_val = diff_sq.mean().item()  # 평균으로 계산
     return crps_val
+
+def compute_csi(pred_probs: torch.Tensor, target_labels: torch.Tensor,
+                threshold_bin: int = 8,  # 예시: 8번 bin 이상의 강수로 간주
+                prob_threshold: float = 0.5) -> float:
+    """
+    pred_probs: (B, C, H, W) - 소프트맥스 확률 분포
+    target_labels: (B, H, W)   - 실제 레이블 (0~C-1)
+    threshold_bin: 특정 mm/h 이상으로 볼 bin 인덱스
+    prob_threshold: 예측이 이 확률 이상이면 '강수 발생'으로 간주
+    
+    반환: CSI 스코어 (클수록 좋음)
+    """
+    B, C, H, W = pred_probs.shape
+
+    # (1) 예측에서 'threshold_bin 이상'이 될 확률 = sum_{k=threshold_bin..C-1} p[k]
+    #   shape=(B, H, W)
+    p_rain = pred_probs[:, threshold_bin:, :, :].sum(dim=1)  # (B,H,W)
+
+    # (2) 예측 이진화
+    #    p_rain >= prob_threshold 면 Positive, 아니면 Negative
+    pred_positive = (p_rain >= prob_threshold)
+
+    # (3) 실제 이진화
+    #     target_labels >= threshold_bin 면 Positive
+    real_positive = (target_labels >= threshold_bin)
+
+    # (4) TP, FP, FN 계산
+    tp = (pred_positive & real_positive).sum().item()
+    fp = (pred_positive & (~real_positive)).sum().item()
+    fn = ((~pred_positive) & real_positive).sum().item()
+
+    # (5) CSI 계산: TP / (TP + FP + FN)
+    denom = tp + fp + fn
+    csi = tp / denom if denom > 0 else 0.0
+    return csi
 # ============================================================
 # (1) Dataset 정의 (사용자 코드 예시 그대로)
 # ============================================================
@@ -154,7 +189,7 @@ metnet3 = MetNet3(
 )
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-torch.device("cuda:1")
+metnet3.to(device)
 
 optimizer = torch.optim.Adam(metnet3.parameters(), lr=1e-4)
 
