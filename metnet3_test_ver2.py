@@ -117,7 +117,7 @@ from metnet3_original import MetNet3
 
 metnet3 = MetNet3(
     dim = 512,
-    num_lead_times = 722,
+    num_lead_times = 180,
     lead_time_embed_dim = 32,
     input_spatial_size = 156,
     attn_depth = 12,
@@ -148,7 +148,7 @@ metnet3 = MetNet3(
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
-metnet3.to(device)
+torch.device("cuda:1")
 
 optimizer = torch.optim.Adam(metnet3.parameters(), lr=1e-4)
 

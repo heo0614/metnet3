@@ -118,8 +118,13 @@ test_loader  = DataLoader(test_dataset,  batch_size=4, shuffle=False, num_worker
 # ============================================================
 from metnet3_original import MetNet3
 
-metnet3 = MetNet3(
+# ------------------------------------------------------------
+# (A) finetuning용 모델 설정
+# ------------------------------------------------------------
+# * 기존 (precip 모델)과 동일한 구조
+metnet3_finetune = MetNet3(
     dim = 512,
+    # lead_time을 논문에서는 722까지 쓰지만, 예시이므로 원본에 맞춤
     num_lead_times = 722,
     lead_time_embed_dim = 32,
     input_spatial_size = 156,
@@ -131,9 +136,9 @@ metnet3 = MetNet3(
     vit_mbconv_expansion_rate = 4,
     vit_mbconv_shrinkage_rate = 0.25,
     # 채널 설정
-    hrrr_channels = 36,      # (dense=36채널)
-    input_2496_channels = 30,# (sparse=30채널)
-    input_4996_channels = 12,# (low=12채널)
+    hrrr_channels = 36,
+    input_2496_channels = 30,
+    input_4996_channels = 12,
     surface_and_hrrr_target_spatial_size = 32,
     precipitation_target_bins = dict(
         total_precipitation = 512,
@@ -150,130 +155,93 @@ metnet3 = MetNet3(
 )
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
-metnet3 = metnet3.to(device) 
-metnet3 = DataParallel(metnet3)  # Enable DistributedDataParallel for multi-GPU usage
+metnet3_finetune.to(device)
 
-optimizer = torch.optim.Adam(metnet3.parameters(), lr=1e-4)
+# ------------------------------------------------------------
+# (B) 기존 강우량 모델(precip)에서 학습된 가중치 로드
+# ------------------------------------------------------------
+save_dir = "/projects/aiid/KIPOT_SKT/Weather/test_outputs"
+save_path_precip = os.path.join(save_dir, "metnet3_final.pth")  # 기존 학습결과
+checkpoint = torch.load(save_path_precip, map_location=device)
+metnet3_finetune.load_state_dict(checkpoint, strict=True)
+
+print("Loaded precipitation-oriented model weights.")
+
+# ------------------------------------------------------------
+# (C) 논문처럼 "topographical embedding"을 무효화하고 싶다면 (선택 사항)
+# ------------------------------------------------------------
+# 예: embedding 파라미터를 0으로 만들고 grad를 막아버림
+if hasattr(metnet3_finetune, "topo_embeddings"):
+    with torch.no_grad():
+        metnet3_finetune.topo_embeddings.weight.zero_()
+    metnet3_finetune.topo_embeddings.weight.requires_grad = False
+    print("Disabled topographical embeddings by zeroing out weights.")
+
+# ------------------------------------------------------------
+# (D) Optimizer 준비 (finetune 단계)
+# ------------------------------------------------------------
+optimizer = torch.optim.Adam(metnet3_finetune.parameters(), lr=1e-5)  # 학습률은 줄이는 경우가 많음
 
 # ============================================================
 # Training Loop with Early Stopping (5 Epochs No Improvement)
 # ============================================================
-best_precip_acc = 0.0
-best_model_state = None
-epoch = 120
-no_improve_count = 0
-max_no_improve = 30
+SURFACE_LOSS_SCALE = 100.0
+HRRR_LOSS_WEIGHT   = 1.0   # 모델 내부도 10으로 곱하지만, 다시 여기서 조정할 수도 있음
 
-while epoch:
-    metnet3.train()
+max_epochs = 30
+for epoch in range(1, max_epochs+1):
+    metnet3_finetune.train()
     epoch_loss = 0.0
+
     for batch in train_loader:
-        # (A) 입력 데이터 준비
-        lead_times = batch['lead_time'].to(device)   # (B,)
-        in_sparse  = batch['input_sparse'].to(device) # (B,30,156,156)
-        in_stale   = batch['input_stale'].to(device)  # (B,6,156,156)
-        in_dense   = batch['input_dense'].to(device)  # (B,36,156,156)
-        in_low     = batch['input_low'].to(device)    # (B,12,156,156)
+        lead_times = batch['lead_time'].to(device)
+        in_sparse  = batch['input_sparse'].to(device)
+        in_stale   = batch['input_stale'].to(device)
+        in_dense   = batch['input_dense'].to(device)
+        in_low     = batch['input_low'].to(device)
 
-        # (B) 타겟 (precipitation, surface, HRRR)
-        precip_targets = { key: value.to(device) for key, value in batch['precipitation_targets'].items() }
-        surface_targets = { key: value.to(device) for key, value in batch['surface_targets'].items() }
-        hrrr_target = batch['hrrr_target'].to(device)   # (B,36,32,32)
+        precip_targets = { k: v.to(device) for k,v in batch['precipitation_targets'].items() }
+        surface_targets = { k: v.to(device) for k,v in batch['surface_targets'].items() }
+        hrrr_target = batch['hrrr_target'].to(device)
 
-        # (C) 모델 forward 및 loss 계산
         optimizer.zero_grad()
 
-        # Custom scaling factor for HRRR loss (10x and per-channel scaling)
-        total_loss, loss_breakdown = metnet3(
+        # (A) 원본 모델 forward
+        total_loss, loss_breakdown = metnet3_finetune(
             lead_times            = lead_times,
-            hrrr_input_2496       = (in_dense * 10)/36,  # Apply 10x scaling to HRRR inputs
+            hrrr_input_2496       = in_dense,
             hrrr_stale_state      = in_stale,
             input_2496            = in_sparse,
             input_4996            = in_low,
-            precipitation_targets = {key: value * 10 for key, value in precip_targets.items()},  # Apply * 10 to each target value
-            surface_targets       = {key: value * 10 for key, value in surface_targets.items()},  # Apply * 10 to each surface target value
+            precipitation_targets = precip_targets,
+            surface_targets       = surface_targets,
             hrrr_target           = hrrr_target,
         )
+        # -> 여기서의 total_loss 는 이미 surface + precip + (hrrr * weight) 더해진 값
 
-        total_loss = total_loss.sum()
-        
-        # Apply dynamic gradient rescaling for dense targets (using L1 norm for channel rescaling)
-        for param in metnet3.parameters():
-            if param.grad is not None:
-                param.grad.data = param.grad.data / (param.grad.data.abs().sum() + 1e-8) * param.grad.data.numel()  # L1 norm scaling
-                
-        total_loss.backward()
+        # (B) 하지만 우리가 따로 정의하는 "외부 가중치"로 다시 합산
+        #  loss_breakdown.surface => dict of surface losses
+        #  loss_breakdown.precipitation => dict of precipitation losses
+        #  loss_breakdown.hrrr => single float (MSE)
+        surface_loss = sum(loss_breakdown.surface.values())  # dict values 합
+        precip_loss  = sum(loss_breakdown.precipitation.values())
+        hrrr_loss    = loss_breakdown.hrrr
+
+        # (C) 원하는 비중으로 다시 합산 (논문처럼 surface=100배, HRRR=10배 등)
+        # 만약 hrrr_loss_weight도 이 부분에서 곱하고 싶다면 아래처럼
+        new_loss = (surface_loss * SURFACE_LOSS_SCALE) \
+                   + (precip_loss) \
+                   + (hrrr_loss * HRRR_LOSS_WEIGHT)
+
+        # (D) backward
+        new_loss.backward()
         optimizer.step()
-        epoch_loss += total_loss.item()
 
-    avg_epoch_loss = epoch_loss / len(train_loader)
-    print(f"[Epoch {epoch}] Average Training Loss = {avg_epoch_loss:.4f}, Loss Breakdown = {loss_breakdown}")
+        epoch_loss += new_loss.item()
 
-    # ============================================================
-    # Validation: CRPS and CSI Calculation
-    # ============================================================
-    metnet3.eval()
-    total_correct = 0
-    total_pixels = 0
-    total_crps = 0.0
-    total_csi = 0.0
-    with torch.no_grad():
-        for batch in val_loader:
-            lead_times = batch['lead_time'].to(device)
-            in_sparse  = batch['input_sparse'].to(device)
-            in_stale   = batch['input_stale'].to(device)
-            in_dense   = batch['input_dense'].to(device)
-            in_low     = batch['input_low'].to(device)
-            precip_targets = { key: value.to(device) for key, value in batch['precipitation_targets'].items() }
+    avg_loss = epoch_loss / len(train_loader)
+    print(f"[Finetuning E{epoch}] Loss={avg_loss:.4f} (surface x {SURFACE_LOSS_SCALE})")
 
-            # 모델 forward (타겟 없이 예측)
-            pred = metnet3(
-                lead_times       = lead_times,
-                hrrr_input_2496  = in_dense,
-                hrrr_stale_state = in_stale,
-                input_2496       = in_sparse,
-                input_4996       = in_low,
-            )
-            # precipitation 예측만 사용 (dict: key는 'total_precipitation')
-            precipitation_preds = pred.precipitation
-            for key, logits in precipitation_preds.items():
-                probs = F.softmax(logits, dim=1)       # (B, C, H, W)
-                preds = torch.argmax(probs, dim=1)       # (B, H, W)
-                pred_labels = preds.reshape(-1)
-                target_labels = precip_targets[key].cpu().numpy().reshape(-1)
-                correct = (pred_labels.cpu().numpy() == target_labels).sum()
-                total_correct += correct
-                total_pixels += target_labels.size
-
-                # CRPS and CSI calculation (example)
-                crps = np.mean(np.abs(pred_labels.cpu().numpy() - target_labels))
-                csi = (correct) / (total_pixels)  # This is a simplified CSI
-
-                total_crps += crps
-                total_csi += csi
-
-    precip_acc = total_correct / total_pixels if total_pixels > 0 else 0
-    print(f"[Epoch {epoch}] Validation CRPS: {total_crps:.4f}, CSI: {total_csi:.4f}, Precipitation Accuracy: {precip_acc:.4f}")
-
-    # 개선이 있을 경우 best model 저장, 없으면 no_improve_count 증가
-    if precip_acc > best_precip_acc:
-        best_precip_acc = precip_acc
-        best_model_state = copy.deepcopy(metnet3.state_dict())
-        no_improve_count = 0
-        print(f"Improved precipitation accuracy to {best_precip_acc:.4f}. Continuing training.")
-    else:
-        no_improve_count += 1
-        print(f"No improvement in precipitation accuracy for {no_improve_count} consecutive epoch(s).")
-
-# ============================================================
-# 최종 모델 저장 (향상된 best model을 저장)
-# ============================================================
-if best_model_state is not None:
-    metnet3.load_state_dict(best_model_state)
-
-save_dir = "/projects/aiid/KIPOT_SKT/Weather/test_outputs"
-os.makedirs(save_dir, exist_ok=True)
-save_path = os.path.join(save_dir, "metnet3_final.pth")
-torch.save(metnet3.state_dict(), save_path)
-print(f"Final model saved to {save_path}")
+print("Done Finetuning for OMO with external weighting")
+save_path_omo = "metnet3_final_omo.pth"
+torch.save(metnet3_finetune.state_dict(), save_path_omo)

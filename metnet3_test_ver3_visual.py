@@ -8,6 +8,62 @@ import numpy as np
 # ============================================================
 # (1) Dataset 정의 (사용자 코드 예시 그대로)
 # ============================================================
+def compute_crps(pred_probs: torch.Tensor, target_labels: torch.Tensor) -> float:
+    """
+    Discrete CRPS 계산을 위한 함수
+    - pred_probs: (B, C, H, W) 예측 확률분포 (소프트맥스 결과)
+    - target_labels: (B, H, W) 실제 정답 (클래스 인덱스)
+    반환: CRPS (float)
+    """
+    B, C, H, W = pred_probs.shape
+    assert target_labels.shape == (B, H, W)
+
+    device = pred_probs.device
+
+    # (1) 예측 CDF
+    cdf_pred = torch.cumsum(pred_probs, dim=1)  # (B, C, H, W)
+    # (2) 실제 CDF
+    #   - target_labels == g 일 때, cdf_true[k] = 1(g <= k)
+    cdf_true = (torch.arange(C, device=device).view(1, C, 1, 1) >= target_labels.unsqueeze(1)).float()
+
+    # (3) 차이 제곱
+    diff_sq = (cdf_pred - cdf_true) ** 2  # (B, C, H, W)
+    # (4) 평균
+    crps_val = diff_sq.mean().item()
+    return crps_val
+
+def compute_csi(pred_probs: torch.Tensor, target_labels: torch.Tensor,
+                threshold_bin: int = 8,
+                prob_threshold: float = 0.5) -> float:
+    """
+    CSI(Critical Success Index) 계산 함수
+    - pred_probs: (B, C, H, W) 예측 확률분포
+    - target_labels: (B, H, W) 실제 정답 (클래스 인덱스)
+    - threshold_bin: 임의 예시 (e.g. 8) -> 8번 bin 이상을 '비가 온다'고 판단
+    - prob_threshold: 예측 확률이 이 이상이면 양성(positive)으로 간주
+    반환: CSI 스코어 (float)
+    """
+    B, C, H, W = pred_probs.shape
+    device = pred_probs.device
+
+    # (1) threshold_bin 이상이 될 확률 = sum_{k=threshold_bin..C-1} pred_probs
+    p_rain = pred_probs[:, threshold_bin:, :, :].sum(dim=1)  # (B,H,W)
+
+    # (2) 예측 이진화
+    pred_positive = (p_rain >= prob_threshold)
+
+    # (3) 실제 이진화
+    real_positive = (target_labels >= threshold_bin)
+
+    # (4) TP / (TP + FP + FN)
+    tp = (pred_positive & real_positive).sum().item()
+    fp = (pred_positive & (~real_positive)).sum().item()
+    fn = ((~pred_positive) & real_positive).sum().item()
+
+    denom = tp + fp + fn
+    csi = tp / denom if denom > 0 else 0.0
+    return csi
+
 class WeatherBenchDataset(Dataset):
     def __init__(self, root_dir):
         self.root_dir = root_dir
@@ -84,10 +140,10 @@ test_root  = r"/projects/aiid/KIPOT_SKT/Weather/testset"
 
 def visualize_inference(model, data_loader, device, num_samples=1):
     """
-    저장된 모델로 추론을 수행하고, 예측 vs. 실제 타겟을 시각화하는 예시 함수
-    num_samples: 시각화할 샘플 개수 (batch size 이상으로 지정해도 batch 범위 내로 제한됨)
+    저장된 모델로 추론을 수행하고, 예측 vs. 실제 타겟을 시각화 + CRPS/CSI 계산
     """
     model.eval()
+
     # 1) 테스트 로더에서 첫 번째 배치를 가져온다
     batch = next(iter(data_loader))
 
@@ -98,7 +154,8 @@ def visualize_inference(model, data_loader, device, num_samples=1):
     in_dense   = batch['input_dense'].to(device)
     in_low     = batch['input_low'].to(device)
 
-    # 3) 타겟(ground truth)은 CPU로 바로 불러도 되고, 비교 편의상 GPU로 올릴 수도 있음
+    # 3) 타겟(ground truth)
+    #   - 여기서는 precipitation_targets['total_precipitation']만 사용
     precip_targets = { k: v.to(device) for k,v in batch['precipitation_targets'].items() }
 
     with torch.no_grad():
@@ -121,7 +178,13 @@ def visualize_inference(model, data_loader, device, num_samples=1):
     # 6) 실제 타겟 (여기서는 high_target의 마지막 프레임) -> shape=(B, H, W)
     precipitation_true_labels = precip_targets['total_precipitation']  # (B, H, W)
 
-    # 7) 시각화 (예: num_samples=1개만 시각화)
+    # 6-1) 배치 전체에 대한 CRPS/CSI 계산
+    crps_val = compute_crps(precipitation_probs, precipitation_true_labels)
+    csi_val  = compute_csi(precipitation_probs, precipitation_true_labels,
+                           threshold_bin=8, prob_threshold=0.5)
+    print(f"[Batch CRPS = {crps_val:.4f}, CSI = {csi_val:.4f}]")
+
+    # 7) 시각화 (예: num_samples=1~B)
     n_samples = min(num_samples, precipitation_pred_labels.shape[0])
     for i in range(n_samples):
         pred_2d = precipitation_pred_labels[i].cpu().numpy()  # (H, W)
@@ -143,6 +206,7 @@ def visualize_inference(model, data_loader, device, num_samples=1):
         plt.show()
 
 
+
 if __name__ == "__main__":
     # ------------------------------------------------------------
     # 1) 저장된 모델 로드
@@ -152,7 +216,7 @@ if __name__ == "__main__":
     # 모델 정의 (학습 때와 동일한 설정)
     metnet3 = MetNet3(
         dim = 512,
-        num_lead_times = 180,
+        num_lead_times = 722,
         lead_time_embed_dim = 32,
         input_spatial_size = 156,
         attn_depth = 12,
