@@ -1079,7 +1079,7 @@ class MetNet3(Module):
 
             surface_pred = rearrange(surface_pred, '... h w -> ... (h w)')
             surface_target = rearrange(surface_target, '... h w -> ... (h w)')
-            surface_loss = F.cross_entropy(surface_pred, surface_target)
+            surface_loss = F.cross_entropy(surface_pred, surface_target,ignore_index=-1)
 
             surface_loss_breakdown[surface_bin_name] = surface_loss
 
@@ -1095,7 +1095,7 @@ class MetNet3(Module):
             precipitation_pred = rearrange(precipitation_pred, '... h w -> ... (h w)')
             precipitation_target = rearrange(precipitation_target, '... h w -> ... (h w)')
 
-            precipition_loss = F.cross_entropy(precipitation_pred, precipitation_target)
+            precipition_loss = F.cross_entropy(precipitation_pred, precipitation_target,ignore_index=-1)
 
             precipitation_loss_breakdown[precipitation_bin_name] = precipition_loss
 
