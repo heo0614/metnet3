@@ -1,85 +1,13 @@
 # %% 
 import os
+
 import matplotlib.pyplot as plt
 import torch
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
-import numpy as np
-# ============================================================
-# (1) Dataset 정의 (사용자 코드 예시 그대로)
-# ============================================================
-class WeatherBenchDataset(Dataset):
-    def __init__(self, root_dir):
-        self.root_dir = root_dir
+from torch.utils.data import DataLoader
 
-        # ==========================
-        # (1) 입력 (Input)
-        # ==========================
-        self.input_sparse = np.load(os.path.join(root_dir, 'input_sparse_normalized.npy'))  # (N,30,156,156)
-        self.input_stale  = np.load(os.path.join(root_dir, 'input_stale_normalized.npy'))   # (N, 6,156,156)
-        self.input_dense  = np.load(os.path.join(root_dir, 'input_dense_normalized.npy'))   # (N,36,156,156)
-        self.input_low    = np.load(os.path.join(root_dir, 'input_low_normalized.npy'))     # (N,12,156,156)
-        self.num_samples = self.input_sparse.shape[0]
-
-        # ==========================
-        # (2) 타겟 (Target)
-        # ==========================
-        self.t2m = np.load(os.path.join(root_dir, 'sparse_target', '2m_temperature.npy'))             # (N,6,32,32)
-        self.d2m = np.load(os.path.join(root_dir, 'sparse_target', '2m_dewpoint_temperature.npy'))    # (N,6,32,32)
-        self.precip32 = np.load(os.path.join(root_dir, 'sparse_target', 'total_precipitation.npy'))   # (N,6,32,32)
-
-        self.dense_target_36ch = np.load(os.path.join(root_dir, 'dense_target.npy'))  # (N,36,32,32)
-        self.high_precip = np.load(os.path.join(root_dir, 'high_target', 'total_precipitation.npy'))  # (N,6,128,128)
-        self.hrrr_36ch   = self.dense_target_36ch  # 예시상 동일하게 사용
-
-        self.surface_bin_names = ('temperature_2m', 'dewpoint_2m')
-        self.precipitation_bin_names = ('total_precipitation',)
-
-    def __len__(self):
-        return self.num_samples
-
-    def __getitem__(self, idx):
-        # ---- 입력 텐서 변환 ----
-        in_sparse = torch.from_numpy(self.input_sparse[idx]).float()  # (30,156,156)
-        in_stale  = torch.from_numpy(self.input_stale[idx]).float()   # ( 6,156,156)
-        in_dense  = torch.from_numpy(self.input_dense[idx]).float()   # (36,156,156)
-        in_low    = torch.from_numpy(self.input_low[idx]).float()     # (12,156,156)
-
-        # ---- 타겟 텐서 변환 ---- (여기서는 이미 bin index라고 가정하여 long으로 변환)
-        t2m_6h    = torch.from_numpy(self.t2m[idx]).long()      # (6,32,32)
-        d2m_6h    = torch.from_numpy(self.d2m[idx]).long()      # (6,32,32)
-        precip_6h = torch.from_numpy(self.precip32[idx]).long() # (6,32,32)
-
-        dense_target_36ch = torch.from_numpy(self.dense_target_36ch[idx]).long()  # (36,32,32)
-        high_precip_6h    = torch.from_numpy(self.high_precip[idx]).long()        # (6,128,128)
-        hrrr_36ch         = torch.from_numpy(self.hrrr_36ch[idx]).float()         # (36,32,32)
-
-        # ---- 임의 리드타임 예시 ----
-        lead_time = torch.tensor(np.random.randint(0, 722), dtype=torch.long)
-
-        sample = {
-            "lead_time": lead_time,
-            "input_sparse": in_sparse,  # (30,156,156)
-            "input_stale":  in_stale,   # ( 6,156,156)
-            "input_dense":  in_dense,   # (36,156,156)
-            "input_low":    in_low,     # (12,156,156),
-            "precipitation_targets": {
-                "total_precipitation": high_precip_6h[-1]   # (128,128)
-            },
-            "surface_targets": {
-                "temperature_2m": t2m_6h[-1],  # (32,32)
-                "dewpoint_2m":    d2m_6h[-1],  # (32,32)
-            },
-            "hrrr_target": hrrr_36ch,   # (36,32,32)
-        }
-        return sample
-
-# ============================================================
-# (2) DataLoader
-# ============================================================
-train_root = r"/projects/aiid/KIPOT_SKT/Weather/trainset"
-val_root   = r"/projects/aiid/KIPOT_SKT/Weather/validationset"
-test_root  = r"/projects/aiid/KIPOT_SKT/Weather/testset"
+from data_preprocessing import test_data_root
+from dataset import WeatherBenchDataset
 
 
 def visualize_inference(model, data_loader, device, num_samples=1):
@@ -196,8 +124,7 @@ if __name__ == "__main__":
     # ------------------------------------------------------------
     # 2) Test DataLoader 준비 (이미 앞선 코드 예시와 동일)
     # ------------------------------------------------------------
-    test_root = r"/projects/aiid/KIPOT_SKT/Weather/testset"
-    test_dataset = WeatherBenchDataset(test_root)
+    test_dataset = WeatherBenchDataset(test_data_root)
     test_loader  = DataLoader(test_dataset, batch_size=2, shuffle=False, num_workers=4)
 
     # ------------------------------------------------------------

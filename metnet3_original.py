@@ -1119,4 +1119,4 @@ class MetNet3(Module):
 
         loss_breakdown = LossBreakdown(surface_loss_breakdown, hrrr_loss, precipitation_loss_breakdown)
 
-        return total_loss, loss_breakdown
+        return pred, total_loss, loss_breakdown
