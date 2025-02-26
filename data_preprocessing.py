@@ -6,17 +6,18 @@ from tqdm import tqdm
 # -------------------------------------------------
 # (A) 경로 및 폴더 설정
 # -------------------------------------------------
-PATH_SPARSE_INPUT = r"/projects/aiid/KIPOT_SKT/Weather/sparse_data_input/156x156_sparse_0.5_input_all.nc"
-PATH_DENSE_INPUT  = r"/projects/aiid/KIPOT_SKT/Weather/dense_data_input/156x156_dense_0.5_input_all.nc"
-PATH_LOW_INPUT    = r"/projects/aiid/KIPOT_SKT/Weather/low_data_input/156x156_low_1.0_input_all.nc"
+weather_bench_root = '../datasets/weather_bench/'
+PATH_SPARSE_INPUT = weather_bench_root + "sparse_data_input/156x156_sparse_0.5_input_all.nc"
+PATH_DENSE_INPUT  = weather_bench_root + "dense_data_input/156x156_dense_0.5_input_all.nc"
+PATH_LOW_INPUT    = weather_bench_root + "low_data_input/156x156_low_1.0_input_all.nc"
 
-PATH_HIGH_TARGET   = r"/projects/aiid/KIPOT_SKT/Weather/high_data_target/128x128_high_target_0.25_all.nc"
-PATH_SPARSE_TARGET = r"/projects/aiid/KIPOT_SKT/Weather/sparse_data_target/32x32_sparse_target_0.5_all.nc"
-PATH_DENSE_TARGET  = r"/projects/aiid/KIPOT_SKT/Weather/dense_data_target/32x32_dense_target_0.5_all.nc"
+PATH_HIGH_TARGET   = weather_bench_root + "high_data_target/128x128_high_target_0.25_all.nc"
+PATH_SPARSE_TARGET = weather_bench_root + "sparse_data_target/32x32_sparse_target_0.5_all.nc"
+PATH_DENSE_TARGET  = weather_bench_root + "dense_data_target/32x32_dense_target_0.5_all.nc"
 
-SAVE_DIR_TRAIN = r"/projects/aiid/KIPOT_SKT/Weather/trainset"
-SAVE_DIR_VALID = r"/projects/aiid/KIPOT_SKT/Weather/validationset"
-SAVE_DIR_TEST  = r"/projects/aiid/KIPOT_SKT/Weather/testset"
+train_data_root = weather_bench_root + "trainset"
+valid_data_root = weather_bench_root + "validationset"
+test_data_root  = weather_bench_root + "testset"
 
 def make_dirs_for_targets(base_dir, subfolders):
     if not os.path.exists(base_dir):
@@ -25,39 +26,6 @@ def make_dirs_for_targets(base_dir, subfolders):
         path_ = os.path.join(base_dir, sf)
         os.makedirs(path_, exist_ok=True)
 
-# -------------------------------------------------
-# (B) NetCDF 로드
-# -------------------------------------------------
-ds_sparse_input  = xr.open_dataset(PATH_SPARSE_INPUT)
-ds_dense_input   = xr.open_dataset(PATH_DENSE_INPUT)
-ds_low_input     = xr.open_dataset(PATH_LOW_INPUT)
-
-ds_high_target   = xr.open_dataset(PATH_HIGH_TARGET)
-ds_sparse_target = xr.open_dataset(PATH_SPARSE_TARGET)
-ds_dense_target  = xr.open_dataset(PATH_DENSE_TARGET)
-
-# -------------------------------------------------
-# (C) 사용할 변수명들
-# -------------------------------------------------
-# sparse_input
-sparse_all_vars = list(ds_sparse_input.data_vars.keys())
-SPARSE_STALE_VAR = '2m_temperature'
-sparse_input_vars = [v for v in sparse_all_vars if v != SPARSE_STALE_VAR]
-
-# dense_input
-dense_all_vars = list(ds_dense_input.data_vars.keys())
-dense_input_vars = dense_all_vars
-
-# low_input
-low_all_vars = list(ds_low_input.data_vars.keys())
-low_input_vars = low_all_vars
-
-# target variables
-sparse_target_vars = list(ds_sparse_target.data_vars.keys())
-high_target_vars   = list(ds_high_target.data_vars.keys())
-
-# dense_target (ex: 여러 변수 -> 합쳐서 36채널)
-dense_target_vars = list(ds_dense_target.data_vars.keys())
 
 # -------------------------------------------------
 # (E) 변수별 (min, max)와 bin 개수 설정
@@ -305,9 +273,9 @@ def main():
         "sparse_target", "dense_target", "high_target",
         "input_sparse", "input_stale", "input_dense", "input_low"
     ]
-    make_dirs_for_targets(SAVE_DIR_TRAIN, subfolders)
-    make_dirs_for_targets(SAVE_DIR_VALID, subfolders)
-    make_dirs_for_targets(SAVE_DIR_TEST,  subfolders)
+    make_dirs_for_targets(train_data_root, subfolders)
+    make_dirs_for_targets(valid_data_root, subfolders)
+    make_dirs_for_targets(test_data_root, subfolders)
 
     sparse_input_train = []
     sparse_input_valid = []
@@ -411,37 +379,71 @@ def main():
     print("\n[3] 저장을 시작합니다.\n")
 
     # ----------- Train ----------- 
-    save_input_list(SAVE_DIR_TRAIN, "input_sparse", sparse_input_train, sparse_input_vars)
-    save_input_list(SAVE_DIR_TRAIN, "input_stale",  stale_state_train, [SPARSE_STALE_VAR])
-    save_input_list(SAVE_DIR_TRAIN, "input_dense",  dense_input_train, dense_input_vars)
-    save_input_list(SAVE_DIR_TRAIN, "input_low",    low_input_train,   low_input_vars)
+    save_input_list(train_data_root, "input_sparse", sparse_input_train, sparse_input_vars)
+    save_input_list(train_data_root, "input_stale", stale_state_train, [SPARSE_STALE_VAR])
+    save_input_list(train_data_root, "input_dense", dense_input_train, dense_input_vars)
+    save_input_list(train_data_root, "input_low", low_input_train, low_input_vars)
 
-    save_target_dict(SAVE_DIR_TRAIN, "sparse_target", sparse_target_train_dict, sparse_target_vars)
-    save_dense_target_as_one_file(SAVE_DIR_TRAIN, dense_target_train, "dense_target")
-    save_target_dict(SAVE_DIR_TRAIN, "high_target", high_target_train_dict, high_target_vars)
+    save_target_dict(train_data_root, "sparse_target", sparse_target_train_dict, sparse_target_vars)
+    save_dense_target_as_one_file(train_data_root, dense_target_train, "dense_target")
+    save_target_dict(train_data_root, "high_target", high_target_train_dict, high_target_vars)
 
     # ----------- Valid ----------- 
-    save_input_list(SAVE_DIR_VALID, "input_sparse", sparse_input_valid, sparse_input_vars)
-    save_input_list(SAVE_DIR_VALID, "input_stale",  stale_state_valid, [SPARSE_STALE_VAR])
-    save_input_list(SAVE_DIR_VALID, "input_dense",  dense_input_valid, dense_input_vars)
-    save_input_list(SAVE_DIR_VALID, "input_low",    low_input_valid,   low_input_vars)
+    save_input_list(valid_data_root, "input_sparse", sparse_input_valid, sparse_input_vars)
+    save_input_list(valid_data_root, "input_stale", stale_state_valid, [SPARSE_STALE_VAR])
+    save_input_list(valid_data_root, "input_dense", dense_input_valid, dense_input_vars)
+    save_input_list(valid_data_root, "input_low", low_input_valid, low_input_vars)
 
-    save_target_dict(SAVE_DIR_VALID, "sparse_target", sparse_target_valid_dict, sparse_target_vars)
-    save_dense_target_as_one_file(SAVE_DIR_VALID, dense_target_valid, "dense_target")
-    save_target_dict(SAVE_DIR_VALID, "high_target", high_target_valid_dict, high_target_vars)
+    save_target_dict(valid_data_root, "sparse_target", sparse_target_valid_dict, sparse_target_vars)
+    save_dense_target_as_one_file(valid_data_root, dense_target_valid, "dense_target")
+    save_target_dict(valid_data_root, "high_target", high_target_valid_dict, high_target_vars)
 
     # ----------- Test ------------
-    save_input_list(SAVE_DIR_TEST, "input_sparse", sparse_input_test, sparse_input_vars)
-    save_input_list(SAVE_DIR_TEST, "input_stale",  stale_state_test, [SPARSE_STALE_VAR])
-    save_input_list(SAVE_DIR_TEST, "input_dense",  dense_input_test, dense_input_vars)
-    save_input_list(SAVE_DIR_TEST, "input_low",    low_input_test,   low_input_vars)
+    save_input_list(test_data_root, "input_sparse", sparse_input_test, sparse_input_vars)
+    save_input_list(test_data_root, "input_stale", stale_state_test, [SPARSE_STALE_VAR])
+    save_input_list(test_data_root, "input_dense", dense_input_test, dense_input_vars)
+    save_input_list(test_data_root, "input_low", low_input_test, low_input_vars)
 
-    save_target_dict(SAVE_DIR_TEST, "sparse_target", sparse_target_test_dict, sparse_target_vars)
-    save_dense_target_as_one_file(SAVE_DIR_TEST, dense_target_test, "dense_target")
-    save_target_dict(SAVE_DIR_TEST, "high_target", high_target_test_dict, high_target_vars)
+    save_target_dict(test_data_root, "sparse_target", sparse_target_test_dict, sparse_target_vars)
+    save_dense_target_as_one_file(test_data_root, dense_target_test, "dense_target")
+    save_target_dict(test_data_root, "high_target", high_target_test_dict, high_target_vars)
 
     print("\n[완료] 모든 Numpy 저장이 끝났습니다.")
 
 
 if __name__ == "__main__":
+    # -------------------------------------------------
+    # (B) NetCDF 로드
+    # -------------------------------------------------
+    ds_sparse_input = xr.open_dataset(PATH_SPARSE_INPUT)
+    ds_dense_input = xr.open_dataset(PATH_DENSE_INPUT)
+    ds_low_input = xr.open_dataset(PATH_LOW_INPUT)
+
+    ds_high_target = xr.open_dataset(PATH_HIGH_TARGET)
+    ds_sparse_target = xr.open_dataset(PATH_SPARSE_TARGET)
+    ds_dense_target = xr.open_dataset(PATH_DENSE_TARGET)
+
+    # -------------------------------------------------
+    # (C) 사용할 변수명들
+    # -------------------------------------------------
+    # sparse_input
+    sparse_all_vars = list(ds_sparse_input.data_vars.keys())
+    SPARSE_STALE_VAR = '2m_temperature'
+    sparse_input_vars = [v for v in sparse_all_vars if v != SPARSE_STALE_VAR]
+
+    # dense_input
+    dense_all_vars = list(ds_dense_input.data_vars.keys())
+    dense_input_vars = dense_all_vars
+
+    # low_input
+    low_all_vars = list(ds_low_input.data_vars.keys())
+    low_input_vars = low_all_vars
+
+    # target variables
+    sparse_target_vars = list(ds_sparse_target.data_vars.keys())
+    high_target_vars = list(ds_high_target.data_vars.keys())
+
+    # dense_target (ex: 여러 변수 -> 합쳐서 36채널)
+    dense_target_vars = list(ds_dense_target.data_vars.keys())
+
     main()
