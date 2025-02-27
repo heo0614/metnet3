@@ -35,13 +35,15 @@ def make_dirs_for_targets(base_dir, subfolders):
 # Add time windows as integer arguments
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--args.time_window_input', type=int, default=6)
-parser.add_argument('--args.time_window_target', type=int, default=6)
+parser.add_argument('--time_window_input', type=int, default=6, help="입력 윈도우 시간 길이")
+parser.add_argument('--time_window_target', type=int, default=6, help="타깃 윈도우 시간 길이")
 
 # Add split boundaries as separate arguments
-parser.add_argument('--train_end', type=int, default=720)
-parser.add_argument('--valid_end', type=int, default=1056)
-parser.add_argument('--test_end', type=int, default=1392)
+parser.add_argument('--train_end', type=int, default=720, help="학습 데이터의 끝 index")
+parser.add_argument('--valid_end', type=int, default=1056, help="검증 데이터의 끝 index")
+parser.add_argument('--test_end', type=int, default=1392, help="테스트 데이터의 끝 index")
+# 배치 사이즈 (파일 분할 저장 시 한 파일에 저장할 샘플 수)
+parser.add_argument('--batch_size', type=int, default=1000, help="한 npy 파일에 저장할 샘플 수")
 
 args = parser.parse_args()
 
@@ -162,28 +164,33 @@ def make_input_array(full_array, start_idx, window_size=6):
     return slice_transposed.reshape(-1, slice_transposed.shape[2], slice_transposed.shape[3])
 
 # -------------------------------------------------
-# (H) Save function for input and target data
+# (H) Save 함수들 - 파일 분할 저장 적용
 # -------------------------------------------------
-def save_input_list(folder, name, array_list, var_list):
+def save_input_list(folder, name, array_list, var_list, batch_size=1000):
     if not array_list:
         print(f"  -> {name} list is empty, skip saving.")
         return
-    arr = np.concatenate(array_list, axis=0)  # (N, C*window, H, W)
-    
-    window_size = 6
+    arr = np.concatenate(array_list, axis=0)  # shape=(N, C*window, H, W)
+    window_size = args.time_window_input  # 입력 윈도우 길이
     normalized_channels = []
     for c_idx, var in enumerate(var_list):
         for w in range(window_size):
             channel_idx = c_idx * window_size + w
             channel_data = arr[:, channel_idx, :, :]
-            normalized = normalize_array(var, channel_data)
-            normalized_channels.append(normalized)
+            normalized_channels.append(normalize_array(var, channel_data))
     normalized_arr = np.stack(normalized_channels, axis=1)
-    out_path = os.path.join(folder, f"{name}_normalized.npy")
-    np.save(out_path, normalized_arr)
-    print(f"  -> Saved {name}_normalized: shape = {normalized_arr.shape} -> {out_path}")
+    
+    num_samples = normalized_arr.shape[0]
+    num_batches = (num_samples + batch_size - 1) // batch_size
+    for batch_idx in range(num_batches):
+        start_idx_batch = batch_idx * batch_size
+        end_idx_batch = min(start_idx_batch + batch_size, num_samples)
+        batch_arr = normalized_arr[start_idx_batch:end_idx_batch]
+        out_path = os.path.join(folder, f"{name}_normalized_{batch_idx:03d}.npy")
+        np.save(out_path, batch_arr)
+        print(f"  -> Saved {name}_normalized_{batch_idx:03d}: shape = {batch_arr.shape} -> {out_path}")
 
-def save_target_dict(folder, subfolder, target_dict, var_list):
+def save_target_dict(folder, subfolder, target_dict, var_list, batch_size=1000):
     """
     sparse_target, high_target, etc에 대해
     각 var별로 binning을 따로 적용하기 위해 linear_scale_and_clamp_to_int()를 호출
@@ -194,19 +201,25 @@ def save_target_dict(folder, subfolder, target_dict, var_list):
         if not arr_list:
             print(f"  -> {var} list is empty, skip.")
             continue
-        arr_cat = np.concatenate(arr_list, axis=0)  # shape=(N, 6, H, W)
+        arr_cat = np.concatenate(arr_list, axis=0)  # shape=(N, window, H, W)
         orig_shape = arr_cat.shape
-
+        
         # Reshape to (N*6, H, W) for scaling
         reshaped_2d = arr_cat.reshape(-1, orig_shape[-2], orig_shape[-1])
-
+        
         # Apply scaling (per var)
         scaled_2d = linear_scale_and_clamp_to_int(var, reshaped_2d, subfolder=subfolder)
-
+        
         arr_scaled = scaled_2d.reshape(orig_shape)
-        fpath = os.path.join(outdir, f"{var}.npy")
-        np.save(fpath, arr_scaled)
-        print(f"  -> Saved {subfolder}/{var}.npy : shape={arr_scaled.shape}")
+        num_samples = arr_scaled.shape[0]
+        num_batches = (num_samples + batch_size - 1) // batch_size
+        for batch_idx in range(num_batches):
+            start_idx_batch = batch_idx * batch_size
+            end_idx_batch = min(start_idx_batch + batch_size, num_samples)
+            batch_arr = arr_scaled[start_idx_batch:end_idx_batch]
+            fpath = os.path.join(outdir, f"{var}_{batch_idx:03d}.npy")
+            np.save(fpath, batch_arr)
+            print(f"  -> Saved {subfolder}/{var}_{batch_idx:03d}.npy : shape={batch_arr.shape}")
 
 def linear_scale_and_clamp_to_int(var_name: str, arr: np.ndarray, subfolder: str = None) -> np.ndarray:
     """
@@ -216,17 +229,13 @@ def linear_scale_and_clamp_to_int(var_name: str, arr: np.ndarray, subfolder: str
       (없으면 기본값 256)
     """
     # (1) bin 개수 결정
-    if subfolder == "high_target" and var_name == "total_precipitation":
-        nbins = 512
-    else:
-        nbins = target_bins.get(var_name, 256)  # dictionary lookup
+    nbins = 512 if (subfolder == "high_target" and var_name == "total_precipitation") else target_bins.get(var_name, 256)
 
     # (2) vmin, vmax 결정
     if var_name in variable_range_info:
-        (vmin, vmax) = variable_range_info[var_name]
+        vmin, vmax = variable_range_info[var_name]
     else:
-        vmin = float(np.nanmin(arr))
-        vmax = float(np.nanmax(arr))
+        vmin, vmax = float(np.nanmin(arr)), float(np.nanmax(arr))
         if vmin == vmax:
             vmax = vmin + 1e-5
 
@@ -234,17 +243,17 @@ def linear_scale_and_clamp_to_int(var_name: str, arr: np.ndarray, subfolder: str
     arr_scaled = (arr - vmin) / (vmax - vmin) * (nbins - 1)
     np.clip(arr_scaled, 0, nbins - 1, out=arr_scaled)
     arr_scaled = np.round(arr_scaled).astype(np.int32)
-
+    
     return arr_scaled
 
-def save_dense_target_as_one_file(folder, arr_list, file_name="dense_target"):
+def save_dense_target_as_one_file(folder, arr_list, file_name="dense_target", batch_size=1000):
     if not arr_list:
         print(f"  -> {file_name} list is empty, skip saving.")
         return
     arr_cat = np.concatenate(arr_list, axis=0)  # (N, T, C, H, W)
     N, T, C, H, W = arr_cat.shape
     arr_cat = arr_cat.transpose(0, 2, 1, 3, 4)  # (N, C, T, H, W)
-
+    
     dense_var_order = [
         "geopotential", "land_sea_mask", "temperature", 
         "10m_u_component_of_wind", "10m_v_component_of_wind", "specific_humidity"
@@ -254,16 +263,23 @@ def save_dense_target_as_one_file(folder, arr_list, file_name="dense_target"):
     for var_idx, var_name in enumerate(dense_var_order):
         ch_data = arr_cat[:, var_idx]
         arr_cat[:, var_idx] = normalize_dense_target(ch_data)
-
+    
     arr_cat = arr_cat.reshape(N, C*T, H, W)
-    out_path = os.path.join(folder, f"{file_name}.npy")
-    np.save(out_path, arr_cat)
-    print(f"  -> Saved {file_name}.npy (normalized) : shape = {arr_cat.shape}")
+    num_samples = arr_cat.shape[0]
+    num_batches = (num_samples + batch_size - 1) // batch_size
+    for batch_idx in range(num_batches):
+        start_idx_batch = batch_idx * batch_size
+        end_idx_batch = min(start_idx_batch + batch_size, num_samples)
+        batch_arr = arr_cat[start_idx_batch:end_idx_batch]
+        out_path = os.path.join(folder, f"{file_name}_{batch_idx:03d}.npy")
+        np.save(out_path, batch_arr)
+        print(f"  -> Saved {file_name}_{batch_idx:03d}.npy (normalized) : shape = {batch_arr.shape}")
+
 
 def normalize_dense_target(arr: np.ndarray) -> np.ndarray:
     return (arr - np.mean(arr)) / np.std(arr)
 
-def save_split_data(split, save_path, inputs, targets):
+def save_split_data(split, save_path, inputs, targets, batch_size=1000):
     """
     split: "train", "valid", "test"
     save_path: 해당 split을 저장할 폴더 경로
@@ -272,13 +288,13 @@ def save_split_data(split, save_path, inputs, targets):
     """
     # 입력 데이터 저장
     for key, (data, var_list) in inputs.items():
-        save_input_list(save_path, key, data, var_list)
+        save_input_list(save_path, key, data, var_list, batch_size=batch_size)
     # 타깃 데이터 저장
     for key, (func, data, var_list) in targets.items():
         if func == save_target_dict:
-            func(save_path, key, data, var_list)
+            func(save_path, key, data, var_list, batch_size=batch_size)
         else:
-            func(save_path, data, key)  # save_dense_target_as_one_file
+            func(save_path, data, key, batch_size=batch_size) 
 
 
 # -------------------------------------------------
@@ -306,7 +322,7 @@ def main():
     for out_dir in [train_data_root, valid_data_root, test_data_root]:
         make_dirs_for_targets(out_dir, subfolders)
 
-        # Containers for split data (initialize dicts for each split)
+    # split 데이터 저장을 위한 컨테이너 구성
     splits = {
         "train": {
             "inputs": {
@@ -398,7 +414,7 @@ def main():
     for split in ["train", "valid", "test"]:
         inputs = splits[split]["inputs"]
         targets = splits[split]["targets"]
-        save_split_data(split, save_paths[split], inputs, targets)
+        save_split_data(split, save_paths[split], inputs, targets, batch_size=args.batch_size)
 
     print("\n[완료] 모든 Numpy 저장이 끝났습니다.")
 
