@@ -2,6 +2,7 @@ import os
 import xarray as xr
 import numpy as np
 from tqdm import tqdm
+import argparse
 
 # -------------------------------------------------
 # (A) 경로 및 폴더 설정
@@ -19,6 +20,8 @@ train_data_root = weather_bench_root + "trainset"
 valid_data_root = weather_bench_root + "validationset"
 test_data_root  = weather_bench_root + "testset"
 
+
+
 def make_dirs_for_targets(base_dir, subfolders):
     if not os.path.exists(base_dir):
         os.makedirs(base_dir, exist_ok=True)
@@ -26,6 +29,21 @@ def make_dirs_for_targets(base_dir, subfolders):
         path_ = os.path.join(base_dir, sf)
         os.makedirs(path_, exist_ok=True)
 
+# -------------------------------------------------
+# (A-1) Time Window 및 split parameter define
+# -------------------------------------------------
+# Add time windows as integer arguments
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--args.time_window_input', type=int, default=6)
+parser.add_argument('--args.time_window_target', type=int, default=6)
+
+# Add split boundaries as separate arguments
+parser.add_argument('--train_end', type=int, default=720)
+parser.add_argument('--valid_end', type=int, default=1056)
+parser.add_argument('--test_end', type=int, default=1392)
+
+args = parser.parse_args()
 
 # -------------------------------------------------
 # (E) 변수별 (min, max)와 bin 개수 설정
@@ -245,10 +263,29 @@ def save_dense_target_as_one_file(folder, arr_list, file_name="dense_target"):
 def normalize_dense_target(arr: np.ndarray) -> np.ndarray:
     return (arr - np.mean(arr)) / np.std(arr)
 
+def save_split_data(split, save_path, inputs, targets):
+    """
+    split: "train", "valid", "test"
+    save_path: 해당 split을 저장할 폴더 경로
+    inputs: dict, key: 이름, value: tuple(리스트, 변수 리스트)
+    targets: dict, key: 이름, value: tuple(저장함수, 데이터, 변수 리스트 or 파일 이름)
+    """
+    # 입력 데이터 저장
+    for key, (data, var_list) in inputs.items():
+        save_input_list(save_path, key, data, var_list)
+    # 타깃 데이터 저장
+    for key, (func, data, var_list) in targets.items():
+        if func == save_target_dict:
+            func(save_path, key, data, var_list)
+        else:
+            func(save_path, data, key)  # save_dense_target_as_one_file
+
+
 # -------------------------------------------------
 # (I) Main Preprocessing
 # -------------------------------------------------
 def main():
+    
     print("[1] 각 Dataset을 (time, channel, lat, lon) 형태로 변환합니다.")
     arr_sparse_input  = dataset_to_array(ds_sparse_input,  sparse_input_vars)
     arr_stale_state   = dataset_to_array(ds_sparse_input,  [SPARSE_STALE_VAR])
@@ -259,157 +296,111 @@ def main():
     arr_high_target   = dataset_to_array(ds_high_target,   high_target_vars)
     arr_dense_target  = dataset_to_array(ds_dense_target,  dense_target_vars)
 
-    TIME_WINDOW_INPUT  = 6
-    TIME_WINDOW_TARGET = 6
-
     total_time = arr_sparse_input.shape[0]
-    max_start = total_time - (TIME_WINDOW_INPUT + TIME_WINDOW_TARGET)
-
-    TRAIN_END = 720
-    VALID_END = 1056
-    TEST_END  = 1392
+    max_start = total_time - (args.time_window_input + args.time_window_target)
 
     subfolders = [
         "sparse_target", "dense_target", "high_target",
         "input_sparse", "input_stale", "input_dense", "input_low"
     ]
-    make_dirs_for_targets(train_data_root, subfolders)
-    make_dirs_for_targets(valid_data_root, subfolders)
-    make_dirs_for_targets(test_data_root, subfolders)
+    for out_dir in [train_data_root, valid_data_root, test_data_root]:
+        make_dirs_for_targets(out_dir, subfolders)
 
-    sparse_input_train = []
-    sparse_input_valid = []
-    sparse_input_test  = []
-
-    stale_state_train  = []
-    stale_state_valid  = []
-    stale_state_test   = []
-
-    dense_input_train = []
-    dense_input_valid = []
-    dense_input_test  = []
-
-    low_input_train   = []
-    low_input_valid   = []
-    low_input_test    = []
-
-    sparse_target_train_dict = {v: [] for v in sparse_target_vars}
-    sparse_target_valid_dict = {v: [] for v in sparse_target_vars}
-    sparse_target_test_dict  = {v: [] for v in sparse_target_vars}
-
-    high_target_train_dict   = {v: [] for v in high_target_vars}
-    high_target_valid_dict   = {v: [] for v in high_target_vars}
-    high_target_test_dict    = {v: [] for v in high_target_vars}
-
-    dense_target_train = []
-    dense_target_valid = []
-    dense_target_test  = []
+        # Containers for split data (initialize dicts for each split)
+    splits = {
+        "train": {
+            "inputs": {
+                "input_sparse": ([], sparse_input_vars),
+                "input_stale":  ([], [SPARSE_STALE_VAR]),
+                "input_dense":  ([], dense_input_vars),
+                "input_low":    ([], low_input_vars)
+            },
+            "targets": {
+                "sparse_target": (save_target_dict, {v: [] for v in sparse_target_vars}, sparse_target_vars),
+                "high_target":   (save_target_dict, {v: [] for v in high_target_vars}, high_target_vars),
+                "dense_target":  (save_dense_target_as_one_file, [], "dense_target")
+            }
+        },
+        "valid": {
+            "inputs": {
+                "input_sparse": ([], sparse_input_vars),
+                "input_stale":  ([], [SPARSE_STALE_VAR]),
+                "input_dense":  ([], dense_input_vars),
+                "input_low":    ([], low_input_vars)
+            },
+            "targets": {
+                "sparse_target": (save_target_dict, {v: [] for v in sparse_target_vars}, sparse_target_vars),
+                "high_target":   (save_target_dict, {v: [] for v in high_target_vars}, high_target_vars),
+                "dense_target":  (save_dense_target_as_one_file, [], "dense_target")
+            }
+        },
+        "test": {
+            "inputs": {
+                "input_sparse": ([], sparse_input_vars),
+                "input_stale":  ([], [SPARSE_STALE_VAR]),
+                "input_dense":  ([], dense_input_vars),
+                "input_low":    ([], low_input_vars)
+            },
+            "targets": {
+                "sparse_target": (save_target_dict, {v: [] for v in sparse_target_vars}, sparse_target_vars),
+                "high_target":   (save_target_dict, {v: [] for v in high_target_vars}, high_target_vars),
+                "dense_target":  (save_dense_target_as_one_file, [], "dense_target")
+            }
+        }
+    }
 
     print(f"[2] 슬라이딩 윈도우 진행: 총 {max_start+1}개 샘플 예상.")
     for start_idx in tqdm(range(max_start + 1)):
-        target_start = start_idx + TIME_WINDOW_INPUT
-        target_end   = target_start + TIME_WINDOW_TARGET
+        target_start = start_idx + args.time_window_input
+        target_end   = target_start + args.time_window_target
 
         # split 결정
-        if target_start <= TRAIN_END:
+        if target_start <= args.train_end:
             split = "train"
-        elif TRAIN_END < target_start <= VALID_END:
+        elif args.train_end < target_start <= args.valid_end:
             split = "valid"
-        elif VALID_END < target_start <= TEST_END:
+        elif args.valid_end < target_start <= args.test_end:
             split = "test"
         else:
             continue
 
         # Inputs (6시간)
-        si = make_input_array(arr_sparse_input, start_idx, TIME_WINDOW_INPUT)
-        st = make_input_array(arr_stale_state,  start_idx, TIME_WINDOW_INPUT)
-        di = make_input_array(arr_dense_input,  start_idx, TIME_WINDOW_INPUT)
-        li = make_input_array(arr_low_input,    start_idx, TIME_WINDOW_INPUT)
+        si = make_input_array(arr_sparse_input, start_idx, args.time_window_input)
+        st = make_input_array(arr_stale_state,  start_idx, args.time_window_input)
+        di = make_input_array(arr_dense_input,  start_idx, args.time_window_input)
+        li = make_input_array(arr_low_input,    start_idx, args.time_window_input)
 
-        if split == "train":
-            sparse_input_train.append(si[None, ...])
-            stale_state_train.append(st[None, ...])
-            dense_input_train.append(di[None, ...])
-            low_input_train.append(li[None, ...])
-        elif split == "valid":
-            sparse_input_valid.append(si[None, ...])
-            stale_state_valid.append(st[None, ...])
-            dense_input_valid.append(di[None, ...])
-            low_input_valid.append(li[None, ...])
-        else:
-            sparse_input_test.append(si[None, ...])
-            stale_state_test.append(st[None, ...])
-            dense_input_test.append(di[None, ...])
-            low_input_test.append(li[None, ...])
+        splits[split]["inputs"]["input_sparse"][0].append(si[None, ...])
+        splits[split]["inputs"]["input_stale"][0].append(st[None, ...])
+        splits[split]["inputs"]["input_dense"][0].append(di[None, ...])
+        splits[split]["inputs"]["input_low"][0].append(li[None, ...])
 
-        # Sparse target
+        # Process sparse target
         st_full = arr_sparse_target[target_start:target_end]
-        for var in sparse_target_vars:
-            vidx = sparse_target_vars.index(var)
-            var_data = st_full[:, vidx]  # (6,H,W)
-            if split == "train":
-                sparse_target_train_dict[var].append(var_data[None, ...])
-            elif split == "valid":
-                sparse_target_valid_dict[var].append(var_data[None, ...])
-            else:
-                sparse_target_test_dict[var].append(var_data[None, ...])
+        for vidx, var in enumerate(sparse_target_vars):
+            var_data = st_full[:, vidx]  # (T, H, W)
+            splits[split]["targets"]["sparse_target"][1][var].append(var_data[None, ...])
 
-        # Dense target
-        dt_full = arr_dense_target[target_start:target_end]  # (6,C,H,W)
-        dt_full = dt_full[None, ...]                         # (1,6,C,H,W)
-        if split == "train":
-            dense_target_train.append(dt_full)
-        elif split == "valid":
-            dense_target_valid.append(dt_full)
-        else:
-            dense_target_test.append(dt_full)
+        # Process dense target (saved as one file)
+        dt_full = arr_dense_target[target_start:target_end]  # (T, C, H, W)
+        splits[split]["targets"]["dense_target"][1].append(dt_full[None, ...])
 
-        # High target
-        ht_full = arr_high_target[target_start:target_end]   # (6,C,H,W)
-        for var in high_target_vars:
-            vidx = high_target_vars.index(var)
+        # Process high target
+        ht_full = arr_high_target[target_start:target_end]  # (T, C, H, W)
+        for vidx, var in enumerate(high_target_vars):
             var_data = ht_full[:, vidx]
-            if split == "train":
-                high_target_train_dict[var].append(var_data[None, ...])
-            elif split == "valid":
-                high_target_valid_dict[var].append(var_data[None, ...])
-            else:
-                high_target_test_dict[var].append(var_data[None, ...])
+            splits[split]["targets"]["high_target"][1][var].append(var_data[None, ...])
 
     print("\n[3] 저장을 시작합니다.\n")
 
-    # ----------- Train ----------- 
-    save_input_list(train_data_root, "input_sparse", sparse_input_train, sparse_input_vars)
-    save_input_list(train_data_root, "input_stale", stale_state_train, [SPARSE_STALE_VAR])
-    save_input_list(train_data_root, "input_dense", dense_input_train, dense_input_vars)
-    save_input_list(train_data_root, "input_low", low_input_train, low_input_vars)
-
-    save_target_dict(train_data_root, "sparse_target", sparse_target_train_dict, sparse_target_vars)
-    save_dense_target_as_one_file(train_data_root, dense_target_train, "dense_target")
-    save_target_dict(train_data_root, "high_target", high_target_train_dict, high_target_vars)
-
-    # ----------- Valid ----------- 
-    save_input_list(valid_data_root, "input_sparse", sparse_input_valid, sparse_input_vars)
-    save_input_list(valid_data_root, "input_stale", stale_state_valid, [SPARSE_STALE_VAR])
-    save_input_list(valid_data_root, "input_dense", dense_input_valid, dense_input_vars)
-    save_input_list(valid_data_root, "input_low", low_input_valid, low_input_vars)
-
-    save_target_dict(valid_data_root, "sparse_target", sparse_target_valid_dict, sparse_target_vars)
-    save_dense_target_as_one_file(valid_data_root, dense_target_valid, "dense_target")
-    save_target_dict(valid_data_root, "high_target", high_target_valid_dict, high_target_vars)
-
-    # ----------- Test ------------
-    save_input_list(test_data_root, "input_sparse", sparse_input_test, sparse_input_vars)
-    save_input_list(test_data_root, "input_stale", stale_state_test, [SPARSE_STALE_VAR])
-    save_input_list(test_data_root, "input_dense", dense_input_test, dense_input_vars)
-    save_input_list(test_data_root, "input_low", low_input_test, low_input_vars)
-
-    save_target_dict(test_data_root, "sparse_target", sparse_target_test_dict, sparse_target_vars)
-    save_dense_target_as_one_file(test_data_root, dense_target_test, "dense_target")
-    save_target_dict(test_data_root, "high_target", high_target_test_dict, high_target_vars)
+    # Save each split using our helper function
+    save_paths = {"train": train_data_root, "valid": valid_data_root, "test": test_data_root}
+    for split in ["train", "valid", "test"]:
+        inputs = splits[split]["inputs"]
+        targets = splits[split]["targets"]
+        save_split_data(split, save_paths[split], inputs, targets)
 
     print("\n[완료] 모든 Numpy 저장이 끝났습니다.")
-
 
 if __name__ == "__main__":
     # -------------------------------------------------
