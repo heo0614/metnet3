@@ -42,8 +42,6 @@ parser.add_argument('--time_window_target', type=int, default=6, help="타깃 �
 parser.add_argument('--train_end', type=int, default=720, help="학습 데이터의 끝 index")
 parser.add_argument('--valid_end', type=int, default=1056, help="검증 데이터의 끝 index")
 parser.add_argument('--test_end', type=int, default=1392, help="테스트 데이터의 끝 index")
-# 배치 사이즈 (파일 분할 저장 시 한 파일에 저장할 샘플 수)
-parser.add_argument('--batch_size', type=int, default=1000, help="한 npy 파일에 저장할 샘플 수")
 
 args = parser.parse_args()
 
@@ -166,7 +164,7 @@ def make_input_array(full_array, start_idx, window_size=6):
 # -------------------------------------------------
 # (H) Save 함수들 - 파일 분할 저장 적용
 # -------------------------------------------------
-def save_input_list(folder, name, array_list, var_list, batch_size=1000):
+def save_input_list(folder, name, array_list, var_list):
     if not array_list:
         print(f"  -> {name} list is empty, skip saving.")
         return
@@ -181,16 +179,14 @@ def save_input_list(folder, name, array_list, var_list, batch_size=1000):
     normalized_arr = np.stack(normalized_channels, axis=1)
     
     num_samples = normalized_arr.shape[0]
-    num_batches = (num_samples + batch_size - 1) // batch_size
-    for batch_idx in range(num_batches):
-        start_idx_batch = batch_idx * batch_size
-        end_idx_batch = min(start_idx_batch + batch_size, num_samples)
-        batch_arr = normalized_arr[start_idx_batch:end_idx_batch]
-        out_path = os.path.join(folder, f"{name}_normalized_{batch_idx:03d}.npy")
-        np.save(out_path, batch_arr)
-        print(f"  -> Saved {name}_normalized_{batch_idx:03d}: shape = {batch_arr.shape} -> {out_path}")
+    
+    # 각 샘플을 개별 파일로 저장
+    for sample_idx in range(num_samples):
+        out_path = os.path.join(folder, f"{name}_sample_{sample_idx:06d}.npy")
+        np.save(out_path, normalized_arr[sample_idx])
+        print(f"  -> Saved {name}_sample_{sample_idx:06d}.npy: shape = {normalized_arr[sample_idx].shape} -> {out_path}")
 
-def save_target_dict(folder, subfolder, target_dict, var_list, batch_size=1000):
+def save_target_dict(folder, subfolder, target_dict, var_list):
     """
     sparse_target, high_target, etc에 대해
     각 var별로 binning을 따로 적용하기 위해 linear_scale_and_clamp_to_int()를 호출
@@ -212,21 +208,18 @@ def save_target_dict(folder, subfolder, target_dict, var_list, batch_size=1000):
         
         arr_scaled = scaled_2d.reshape(orig_shape)
         num_samples = arr_scaled.shape[0]
-        num_batches = (num_samples + batch_size - 1) // batch_size
-        for batch_idx in range(num_batches):
-            start_idx_batch = batch_idx * batch_size
-            end_idx_batch = min(start_idx_batch + batch_size, num_samples)
-            batch_arr = arr_scaled[start_idx_batch:end_idx_batch]
-            fpath = os.path.join(outdir, f"{var}_{batch_idx:03d}.npy")
-            np.save(fpath, batch_arr)
-            print(f"  -> Saved {subfolder}/{var}_{batch_idx:03d}.npy : shape={batch_arr.shape}")
+        
+        # 각 샘플을 개별 파일로 저장
+        for sample_idx in range(num_samples):
+            fpath = os.path.join(outdir, f"{var}_sample_{sample_idx:06d}.npy")
+            np.save(fpath, arr_scaled[sample_idx])
+            print(f"  -> Saved {subfolder}/{var}_sample_{sample_idx:06d}.npy: shape = {arr_scaled[sample_idx].shape}")
 
 def linear_scale_and_clamp_to_int(var_name: str, arr: np.ndarray, subfolder: str = None) -> np.ndarray:
     """
     수정된 부분:
     - subfolder == "high_target" and var_name=="total_precipitation" => 512 bins
-    - 그렇지 않다면 target_bins 딕셔너리에서 var_name에 해당하는 bin 개수를 가져옴
-      (없으면 기본값 256)
+    - 그렇지 않다면 target_bins 딕셔너리에서 var_name에 해당하는 bin 개수를 가져옴 (없으면 기본값 256)
     """
     # (1) bin 개수 결정
     nbins = 512 if (subfolder == "high_target" and var_name == "total_precipitation") else target_bins.get(var_name, 256)
@@ -246,7 +239,7 @@ def linear_scale_and_clamp_to_int(var_name: str, arr: np.ndarray, subfolder: str
     
     return arr_scaled
 
-def save_dense_target_as_one_file(folder, arr_list, file_name="dense_target", batch_size=1000):
+def save_dense_target_as_one_file(folder, arr_list, file_name="dense_target"):
     if not arr_list:
         print(f"  -> {file_name} list is empty, skip saving.")
         return
@@ -266,20 +259,16 @@ def save_dense_target_as_one_file(folder, arr_list, file_name="dense_target", ba
     
     arr_cat = arr_cat.reshape(N, C*T, H, W)
     num_samples = arr_cat.shape[0]
-    num_batches = (num_samples + batch_size - 1) // batch_size
-    for batch_idx in range(num_batches):
-        start_idx_batch = batch_idx * batch_size
-        end_idx_batch = min(start_idx_batch + batch_size, num_samples)
-        batch_arr = arr_cat[start_idx_batch:end_idx_batch]
-        out_path = os.path.join(folder, f"{file_name}_{batch_idx:03d}.npy")
-        np.save(out_path, batch_arr)
-        print(f"  -> Saved {file_name}_{batch_idx:03d}.npy (normalized) : shape = {batch_arr.shape}")
+    for sample_idx in range(num_samples):
+        out_path = os.path.join(folder, f"{file_name}_sample_{sample_idx:06d}.npy")
+        np.save(out_path, arr_cat[sample_idx])
+        print(f"  -> Saved {file_name}_sample_{sample_idx:06d}.npy (normalized): shape = {arr_cat[sample_idx].shape} -> {out_path}")
 
 
 def normalize_dense_target(arr: np.ndarray) -> np.ndarray:
     return (arr - np.mean(arr)) / np.std(arr)
 
-def save_split_data(split, save_path, inputs, targets, batch_size=1000):
+def save_split_data(split, save_path, inputs, targets):
     """
     split: "train", "valid", "test"
     save_path: 해당 split을 저장할 폴더 경로
@@ -288,14 +277,13 @@ def save_split_data(split, save_path, inputs, targets, batch_size=1000):
     """
     # 입력 데이터 저장
     for key, (data, var_list) in inputs.items():
-        save_input_list(save_path, key, data, var_list, batch_size=batch_size)
+        save_input_list(save_path, key, data, var_list)
     # 타깃 데이터 저장
     for key, (func, data, var_list) in targets.items():
         if func == save_target_dict:
-            func(save_path, key, data, var_list, batch_size=batch_size)
+            func(save_path, key, data, var_list)
         else:
-            func(save_path, data, key, batch_size=batch_size) 
-
+            func(save_path, data, key)
 
 # -------------------------------------------------
 # (I) Main Preprocessing
