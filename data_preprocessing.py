@@ -117,6 +117,30 @@ variable_norm_info = {
 }
 
 # -------------------------------------------------
+# (B) flatten_level_coordinate 함수 정의
+# -------------------------------------------------
+def flatten_level_coordinate(ds: xr.Dataset) -> xr.Dataset:
+    """
+    Dataset 내에 'level' 좌표가 존재하고, 해당 좌표를 사용하는 변수에 대해
+    각 level slice를 새 변수로 생성합니다.
+    새 변수 이름은 원래 변수명에 '_'와 level 값(예: temperature_850)으로 지정됩니다.
+    그리고 원래 변수와 level 좌표는 제거합니다.
+    """
+    if 'level' not in ds.coords:
+        return ds
+    ds_new = ds.copy()
+    vars_to_check = list(ds_new.data_vars.keys())
+    for var in vars_to_check:
+        if 'level' in ds_new[var].dims:
+            for lvl in ds_new.level.values:
+                # level 값이 정수 또는 실수라면 str(lvl)을 사용하여 이름에 추가합니다.
+                new_var_name = f"{var}_{lvl}"
+                ds_new[new_var_name] = ds_new[var].sel(level=lvl)
+            ds_new = ds_new.drop_vars(var)
+    ds_new = ds_new.drop_vars('level')
+    return ds_new
+
+# -------------------------------------------------
 # (F) 정규화 함수 (Min-Max 및 평균 0, 표준편차 1)
 # -------------------------------------------------
 def normalize_array(var_name: str, arr: np.ndarray) -> np.ndarray:
@@ -402,7 +426,7 @@ def main():
     for split in ["train", "valid", "test"]:
         inputs = splits[split]["inputs"]
         targets = splits[split]["targets"]
-        save_split_data(split, save_paths[split], inputs, targets, batch_size=args.batch_size)
+        save_split_data(split, save_paths[split], inputs, targets)
 
     print("\n[완료] 모든 Numpy 저장이 끝났습니다.")
 
@@ -421,6 +445,15 @@ if __name__ == "__main__":
     # -------------------------------------------------
     # (C) 사용할 변수명들
     # -------------------------------------------------
+    
+    # flatten_level_coordinate 적용: 각 Dataset에 "level" 좌표가 있다면 flatten 처리
+    ds_sparse_input  = flatten_level_coordinate(ds_sparse_input)
+    ds_dense_input   = flatten_level_coordinate(ds_dense_input)
+    ds_low_input     = flatten_level_coordinate(ds_low_input)
+    ds_high_target   = flatten_level_coordinate(ds_high_target)
+    ds_sparse_target = flatten_level_coordinate(ds_sparse_target)
+    ds_dense_target  = flatten_level_coordinate(ds_dense_target)
+    
     # sparse_input
     sparse_all_vars = list(ds_sparse_input.data_vars.keys())
     SPARSE_STALE_VAR = '2m_temperature'
