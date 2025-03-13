@@ -17,53 +17,76 @@ class KrigingConfig:
     device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
     exclude_vars: List[str] = None  # Variables to exclude from processing
 
+
 def dataset_to_array_kriging(ds: xr.Dataset, config: Optional[KrigingConfig] = None) -> np.ndarray:
     """
-    Process all variables in xarray Dataset using Kriging interpolation.
+    Process all variables in an xarray Dataset using Kriging interpolation.
     
     Args:
-        ds: xarray Dataset containing the variables to interpolate
-        config: Optional KrigingConfig object for customization
+        ds: xarray Dataset containing the variables to interpolate.
+            If a numpy array (or MaskedArray) is provided, it will be converted to a DataArray.
+        config: Optional KrigingConfig object for customization.
         
     Returns:
-        Concatenated numpy array of interpolated values
+        Concatenated numpy array of interpolated values.
     """
+    # 만약 ds가 xarray.Dataset가 아니라면, DataArray로 변환
+    if not hasattr(ds, "coords"):
+        # ds가 numpy 배열인 경우. ndim이 4이면 (time, channel, lat, lon)
+        if ds.ndim == 4:
+            dims = ("time", "channel", "lat", "lon")
+            coords = {
+                "time": np.arange(ds.shape[0]),
+                "channel": np.arange(ds.shape[1]),
+                "lat": np.arange(ds.shape[2]),
+                "lon": np.arange(ds.shape[3]),
+            }
+        elif ds.ndim == 2:
+            dims = ("lat", "lon")
+            coords = {
+                "lat": np.arange(ds.shape[0]),
+                "lon": np.arange(ds.shape[1]),
+            }
+        else:
+            raise ValueError(f"Unsupported array ndim: {ds.ndim}")
+        ds = xr.DataArray(np.ma.filled(ds, np.nan), dims=dims, coords=coords).to_dataset(name="data")
+    
     if config is None:
         config = KrigingConfig()
         
     device = torch.device(config.device)
     arrays = []
     
-    # Get list of variables to process
+    # Get list of variables to process (제외할 변수와 좌표 변수는 건너뜀)
     exclude_vars = config.exclude_vars or []
     coordinate_vars = list(ds.coords.keys())
     var_list = [var for var in ds.variables 
                 if var not in exclude_vars 
                 and var not in coordinate_vars
-                and len(ds[var].dims) >= 2]  # Only process variables with spatial dimensions
+                and len(ds[var].dims) >= 2]  # 최소 2차원 이상의 변수만 처리
     
     print(f"Processing variables: {var_list}")
     
     for var in var_list:
-        # Get the data array and prepare it
         da = ds[var]
         
-        # Skip variables without spatial dimensions
+        # spatial dimensions가 없으면 건너뜀
         if 'latitude' not in da.dims or 'longitude' not in da.dims:
             print(f"Skipping {var}: missing spatial dimensions")
             continue
             
-        # Replace zeros with NaN
+        # 0인 값을 NaN으로 변경
         da = da.where(da != 0, np.nan)
         
-        # Convert coordinates to tensors
+        # xarray Dataset은 보통 'latitude'와 'longitude'라는 좌표를 갖습니다.
+        # 이를 tensor로 변환
         lat = torch.tensor(da.latitude.values, device=device)
         lon = torch.tensor(da.longitude.values, device=device)
         
-        # Create meshgrid
+        # meshgrid 생성 (xy indexing)
         lon_grid, lat_grid = torch.meshgrid(lon, lat, indexing='xy')
         
-        # Handle different dimensional data
+        # 시간 축이 존재하면 각 시간에 대해 보간 처리, 아니면 2D 처리
         if 'time' in da.dims:
             time_arrays = []
             for time_idx in range(len(da.time)):
@@ -72,15 +95,14 @@ def dataset_to_array_kriging(ds: xr.Dataset, config: Optional[KrigingConfig] = N
                     values, lon_grid, lat_grid, config, device
                 )
                 time_arrays.append(interpolated)
-            data_3d = np.stack(time_arrays, axis=0)
+            data_3d = np.stack(time_arrays, axis=0)  # (time, H, W)
         else:
-            # Handle 2D data (single time step)
             values = torch.tensor(da.values, device=device)
             data_3d = _interpolate_single_field(
                 values, lon_grid, lat_grid, config, device
             )[np.newaxis, ...]
         
-        # Add level dimension if not present
+        # 만약 'level' 차원이 없다면, 새 차원을 추가하여 (time, 1, H, W) 형태로 만듦
         if 'level' not in da.dims:
             data_4d = data_3d[:, np.newaxis, :, :]
         else:
@@ -89,6 +111,7 @@ def dataset_to_array_kriging(ds: xr.Dataset, config: Optional[KrigingConfig] = N
         arrays.append(data_4d)
     
     return np.concatenate(arrays, axis=1)
+
 
 def _interpolate_single_field(values: torch.Tensor, 
                               lon_grid: torch.Tensor, 
@@ -101,7 +124,7 @@ def _interpolate_single_field(values: torch.Tensor,
     lat_flat = lat_grid.flatten()
     values_flat = values.flatten()
     
-    # Sample points for Kriging
+    # Sample valid points
     valid_mask = ~torch.isnan(values_flat)
     valid_points = valid_mask.sum().item()
     num_samples = int(config.sampling_ratio * valid_points)
@@ -109,7 +132,7 @@ def _interpolate_single_field(values: torch.Tensor,
     indices = torch.where(valid_mask)[0]
     sample_indices = indices[torch.randperm(len(indices))[:num_samples]]
     
-    # Perform Kriging
+    # Perform Kriging using TorchKriging
     kriging = TorchKriging(
         lon_flat[sample_indices],
         lat_flat[sample_indices],
@@ -121,32 +144,27 @@ def _interpolate_single_field(values: torch.Tensor,
         device=config.device
     )
     
-    # Predict values
+    # Predict on the entire grid
     predicted_values, _ = kriging.predict(lon_flat, lat_flat)
     
-    # Reshape and return
+    # Reshape to original 2D shape and return as numpy array
     return predicted_values.reshape(values.shape).cpu().numpy()
 
-#Example usage:
+
+# Example usage:
 if __name__ == "__main__":
-    # Load your dataset
-    ds = xr.open_dataset('/projects/aiid/KIPOT_SKT/Weather/sparse_data_input/156x156_sparse_0.5_input_all_80_zero.nc')  # 사용될 dataset.
+    # Load dataset (xarray.Dataset)
+    ds = xr.open_dataset('/projects/aiid/KIPOT_SKT/Weather/sparse_data_input/156x156_sparse_0.5_input_all_80_zero.nc')
     
     # Optional: customize kriging parameters
     config = KrigingConfig(
         variogram_model='exponential',
         sampling_ratio=0.025,
         device='cuda' if torch.cuda.is_available() else 'cpu',
-        exclude_vars=['land_sea_mask']  # Optional: exclude specific variables
+        exclude_vars=['land_sea_mask']
     )
     
-    # 시간 측정 시작
     start_time = time.time()
-    
-    # Run interpolation on all suitable variables
     interpolated_data = dataset_to_array_kriging(ds, config)
-    
-    # 시간 측정 종료
     elapsed_time = time.time() - start_time
     print(f"전체 동작 시간: {elapsed_time:.2f}초")
-
