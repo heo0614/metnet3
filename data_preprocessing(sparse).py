@@ -1,3 +1,5 @@
+# %% 
+
 import os
 import xarray as xr
 import numpy as np
@@ -34,7 +36,7 @@ def make_dirs_for_targets(base_dir, subfolders):
 
 # -------------------------------------------------
 # (B) NetCDF 로드
-# -------------------------------------------------
+# -----------------------                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          --------------------------
 ds_sparse_stale = xr.open_dataset(PATH_SPARSE_INPUT)
 ds_sparse_interp = xr.open_dataset(SAVE_ZERO_PATH)
 
@@ -445,3 +447,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# %%

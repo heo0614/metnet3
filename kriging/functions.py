@@ -32,8 +32,8 @@ class TorchKriging:
         self.kriging_matrix = self._build_kriging_matrix()
         extended_values = torch.cat([self.values.to(torch.float32), 
                              torch.tensor([0.0], device=self.device, dtype=torch.float32)])
-        print("Kriging matrix dtype:", self.kriging_matrix.dtype)
-        print("Extended values dtype:", extended_values.dtype)
+        # print("Kriging matrix dtype:", self.kriging_matrix.dtype)
+        # print("Extended values dtype:", extended_values.dtype)
 
         self.weights = torch.linalg.solve(self.kriging_matrix, extended_values) 
 

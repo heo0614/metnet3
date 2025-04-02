@@ -158,7 +158,7 @@ test_loader  = DataLoader(test_dataset,  batch_size=2, shuffle=False, num_worker
 from metnet3_original import MetNet3
 
 metnet3 = MetNet3(
-     dim = 512,
+    dim = 512,
     num_lead_times = 722,
     lead_time_embed_dim = 32,
     input_spatial_size = 156,
@@ -169,13 +169,13 @@ metnet3 = MetNet3(
     vit_window_size = 8,
     vit_mbconv_expansion_rate = 4,
     vit_mbconv_shrinkage_rate = 0.25,
-    # 실제 NC 파일 기준으로 채널 수 수정
-    hrrr_channels = 6,           # Dense Input: 6 채널
-    input_2496_channels = 6,     # Sparse Input: 6 채널
-    input_4996_channels = 2,     # Low Input: 2 채널
+    # 채널 설정
+    hrrr_channels = 36,
+    input_2496_channels = 30,
+    input_4996_channels = 12,
     surface_and_hrrr_target_spatial_size = 32,
     precipitation_target_bins = dict(
-        total_precipitation = 512,
+        total_precipitation = 512,  # 512 bins
     ),
     surface_target_bins = dict(
         temperature_2m = 256,
